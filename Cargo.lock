@@ -215,7 +215,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "cqlc"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "clap",
  "cqlc-codegen",
@@ -228,14 +228,14 @@ dependencies = [
 
 [[package]]
 name = "cqlc-codegen"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "cqlc-core",
 ]
 
 [[package]]
 name = "cqlc-compile-types"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "futures",
  "scylla",
@@ -244,14 +244,14 @@ dependencies = [
 
 [[package]]
 name = "cqlc-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "cqlc-example-basic"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "futures",
@@ -262,7 +262,7 @@ dependencies = [
 
 [[package]]
 name = "cqlc-example-shop"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "futures",

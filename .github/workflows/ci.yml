@@ -4,12 +4,17 @@ on:
   push:
     branches: [master]
   pull_request:
+  schedule:
+    # Catch new server or driver releases breaking things.
+    - cron: "17 4 * * 1"
 
 env:
   CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
 
 jobs:
   check:
+    name: fmt, clippy, tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,27 +25,102 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - run: cargo test --workspace --doc
       # Generated code must compile against the pinned driver ...
-      - run: cargo build -p cqlc-example-basic -p cqlc-compile-types
-      # ... and the committed output must match the sources.
-      - run: cargo run -q -p cqlc -- -c examples/basic/cqlc.toml generate --check
-      - run: cargo run -q -p cqlc -- -c tests/compile-types/cqlc.toml generate --check
+      - run: cargo build -p cqlc-example-basic -p cqlc-example-shop -p cqlc-compile-types
+      # ... and the committed output must match the sources, without warnings.
+      - name: generated files are current
+        run: |
+          for p in examples/basic examples/shop tests/compile-types; do
+            cargo run -q -p cqlc -- -c "$p/cqlc.toml" generate --check --deny-warnings
+          done
 
-  integration:
+  msrv:
+    name: MSRV (1.88)
     runs-on: ubuntu-latest
-    services:
-      cassandra:
-        image: cassandra:5.0
-        ports:
-          - 9042:9042
-        options: >-
-          --health-cmd "cqlsh -e 'describe keyspaces'"
-          --health-interval 10s
-          --health-timeout 10s
-          --health-retries 30
-          --health-start-period 30s
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      # The published crates only: the examples depend on whatever the driver's dependencies need.
+      - run: cargo check -p cqlc-core -p cqlc-codegen -p cqlc --all-targets
+
+  docs:
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --no-deps -p cqlc-core -p cqlc-codegen
+
+  servers:
+    name: end-to-end (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Cassandra 4.1
+            run: docker run -d --name db -p 9042:9042 -e MAX_HEAP_SIZE=512M -e HEAP_NEWSIZE=128M cassandra:4.1
+          - name: Cassandra 5.0
+            run: docker run -d --name db -p 9042:9042 -e MAX_HEAP_SIZE=512M -e HEAP_NEWSIZE=128M cassandra:5.0
+          - name: ScyllaDB
+            run: docker run -d --name db -p 9042:9042 scylladb/scylla:latest --smp 1 --memory 750M --overprovisioned 1 --developer-mode 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: start server
+        run: ${{ matrix.run }}
+      - name: build while the server starts
+        run: cargo build -p cqlc-example-basic -p cqlc-example-shop
+      - name: wait for the server
+        run: |
+          for i in $(seq 1 90); do
+            if docker exec db cqlsh -e 'select release_version from system.local' >/dev/null 2>&1; then
+              echo "ready after $((i * 5))s"; exit 0
+            fi
+            sleep 5
+          done
+          docker logs db | tail -50
+          exit 1
       - run: cargo run -p cqlc-example-basic
+      - run: cargo run -p cqlc-example-shop
+
+  fuzz:
+    name: fuzz (60s per target)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - run: cargo install cargo-fuzz --locked
+      - name: run targets
+        working-directory: fuzz
+        run: |
+          for t in lexer parse_queries parse_schema compile; do
+            mkdir -p "corpus/$t"
+            cp ../examples/shop/queries/*.cql "corpus/$t/" 2>/dev/null || true
+            cargo +nightly fuzz run "$t" -- -max_total_time=60 -rss_limit_mb=2048
+          done
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+
+  audit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      checks: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

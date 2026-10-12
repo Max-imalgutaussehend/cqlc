@@ -17,12 +17,18 @@ Codes are stable. `CQL0xx` syntax, `CQL1xx` errors, `CQL2xx` warnings.
 | CQL109 | error | Invalid primary key definition |
 | CQL110 | error | Type has no supported Rust mapping (UDTs, unorderable set/map keys) |
 | CQL111 | error | Statement does not address the full primary key it needs |
-| CQL112 | error | Restriction or assignment Cassandra rejects (range on partition key, updating key columns, ...) |
+| CQL112 | error | Restriction, assignment or expression Cassandra rejects (range on partition key, updating key columns, `!=` in `WHERE`, aggregates outside the selection, ...) |
+| CQL113 | error | Unknown or unsupported function |
+| CQL114 | error | Expression in the selection list needs an `AS` alias |
+| CQL115 | error | Reserved CQL keyword used as an unquoted name |
 | CQL201 | warning | Partition key not fully restricted; query may scan many partitions |
 | CQL202 | warning | `ALLOW FILTERING` is used |
 | CQL203 | warning | Restriction on a non-key column (needs an index or `ALLOW FILTERING`) |
 | CQL204 | warning | Clustering columns are not restricted left to right |
+| CQL205 | warning | `ORDER BY` does not follow the clustering order or its exact reverse |
 
-Warnings never block generation (use `--deny-warnings` to change that). A query with
+Warnings never block generation (use `--deny-warnings` to change that). An intended warning can be
+silenced for one query with a comment before it, e.g. `-- allow: CQL201, CQL202`; only the warning
+codes CQL201 to CQL205 can be allowed. A query with
 an error is not generated; other queries are still analyzed so one run reports as many
 problems as possible.

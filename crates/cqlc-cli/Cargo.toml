@@ -1,23 +1,28 @@
 [package]
 name = "cqlc"
-description = "Command line interface for cqlc, a static CQL analyzer and Rust code generator"
+description = "Static CQL analyzer and Rust code generator for Cassandra-compatible databases, like sqlc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://github.com/Max-imalgutaussehend/cqlc#readme"
 rust-version.workspace = true
+keywords.workspace = true
+categories = ["database", "development-tools", "command-line-utilities"]
+readme = "README.md"
 
 [[bin]]
 name = "cqlc"
 path = "src/main.rs"
 
 [dependencies]
-cqlc-core = { path = "../cqlc-core" }
-cqlc-codegen = { path = "../cqlc-codegen" }
+cqlc-core.workspace = true
+cqlc-codegen.workspace = true
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
 serde_json = "1"
+toml = "0.8"
 
 [dev-dependencies]
 tempfile = "3"

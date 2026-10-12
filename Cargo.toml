@@ -4,8 +4,22 @@ members = ["crates/*", "examples/basic", "examples/shop", "tests/compile-types"]
 default-members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/Max-imalgutaussehend/cqlc"
+homepage = "https://github.com/Max-imalgutaussehend/cqlc"
+documentation = "https://docs.rs/cqlc-core"
+# Driven by the ScyllaDB driver that generated code builds against.
 rust-version = "1.88"
+keywords = ["cassandra", "scylla", "cql", "codegen", "sqlc"]
+categories = ["database", "development-tools"]
+
+[workspace.dependencies]
+cqlc-core = { path = "crates/cqlc-core", version = "1.0.0" }
+cqlc-codegen = { path = "crates/cqlc-codegen", version = "1.0.0" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

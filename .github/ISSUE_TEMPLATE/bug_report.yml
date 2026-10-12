@@ -1,0 +1,37 @@
+name: Bug report
+description: cqlc rejects valid CQL, generates wrong code, or crashes
+labels: [bug]
+body:
+  - type: textarea
+    id: schema
+    attributes:
+      label: Schema
+      description: The smallest `CREATE` statements that reproduce the problem.
+      render: sql
+    validations:
+      required: true
+  - type: textarea
+    id: query
+    attributes:
+      label: Query
+      render: sql
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: The diagnostic or the generated code that is wrong. For wrong behavior at runtime, include the server error.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: "`cqlc --version`, `scylla` driver version, Cassandra or ScyllaDB version"
+    validations:
+      required: true

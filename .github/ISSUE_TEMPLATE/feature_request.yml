@@ -1,0 +1,19 @@
+name: Unsupported CQL
+description: A CQL construct is rejected with CQL002 and you need it
+labels: [enhancement]
+body:
+  - type: textarea
+    id: query
+    attributes:
+      label: The CQL you want to use
+      render: sql
+    validations:
+      required: true
+  - type: textarea
+    id: types
+    attributes:
+      label: The Rust types you would expect for parameters and results
+  - type: textarea
+    id: why
+    attributes:
+      label: Why you need it

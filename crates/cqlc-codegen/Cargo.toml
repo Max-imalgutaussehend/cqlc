@@ -1,11 +1,18 @@
 [package]
 name = "cqlc-codegen"
-description = "Rust code generator for cqlc"
+description = "Rust code generator for cqlc: turns analyzed CQL queries into typed ScyllaDB driver code"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/cqlc-codegen"
 rust-version.workspace = true
+keywords.workspace = true
+categories = ["database", "development-tools"]
+readme = "README.md"
+# The golden tests compare against the example projects of the workspace.
+exclude = ["tests/"]
 
 [dependencies]
-cqlc-core = { path = "../cqlc-core" }
+cqlc-core.workspace = true

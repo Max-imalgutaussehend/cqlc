@@ -5,7 +5,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/cqlc-core"
 rust-version.workspace = true
+keywords.workspace = true
+categories = ["database", "parser-implementations", "development-tools"]
+readme = "README.md"
 
 [dev-dependencies]
 proptest = "1"
