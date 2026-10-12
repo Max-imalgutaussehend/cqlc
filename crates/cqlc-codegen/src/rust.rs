@@ -135,11 +135,11 @@ fn header(e: &mut Emitter) {
 fn collect_udts(ty: &CqlType, ir: &Ir, out: &mut BTreeSet<String>) {
     match ty {
         CqlType::Udt(name) => {
-            if out.insert(name.clone()) {
-                if let Some(u) = ir.udts.iter().find(|u| &u.name == name) {
-                    for (_, f) in &u.fields {
-                        collect_udts(f, ir, out);
-                    }
+            if out.insert(name.clone())
+                && let Some(u) = ir.udts.iter().find(|u| &u.name == name)
+            {
+                for (_, f) in &u.fields {
+                    collect_udts(f, ir, out);
                 }
             }
         }
@@ -338,9 +338,7 @@ fn query(q: &Query, ir: &Ir, opts: &Options) -> Result<Generated, Vec<Diagnostic
             e.line("/// Whether the write was applied.");
             e.line("pub applied: bool,");
             for (field, t, _) in &cols {
-                e.line(format!(
-                    "/// Current value, reported by the database when `applied` is false."
-                ));
+                e.line("/// Current value, reported by the database when `applied` is false.");
                 e.line(format!("pub {field}: {t},"));
             }
             e.close();
