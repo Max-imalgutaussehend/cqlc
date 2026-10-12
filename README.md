@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/logo.png" width="220" alt="cqlc logo: an orange crab with the Cassandra eye">
+</p>
+
 # cqlc
 
 [![CI](https://github.com/Max-imalgutaussehend/cqlc/actions/workflows/ci.yml/badge.svg)](https://github.com/Max-imalgutaussehend/cqlc/actions/workflows/ci.yml)
