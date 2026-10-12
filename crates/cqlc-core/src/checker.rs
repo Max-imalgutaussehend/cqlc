@@ -108,6 +108,21 @@ impl<'a> Checker<'a> {
     }
 
     fn query(&mut self, q: &QueryDef) -> Option<Query> {
+        let start = self.diags.len();
+        let result = self.query_inner(q);
+        if !q.allow.is_empty() {
+            let allow = &q.allow;
+            let mut i = start;
+            self.diags.retain(|d| {
+                let keep = i < start || d.is_error() || !allow.contains(&d.code);
+                i += 1;
+                keep
+            });
+        }
+        result
+    }
+
+    fn query_inner(&mut self, q: &QueryDef) -> Option<Query> {
         let before = self.error_count();
         let mut ctx = Ctx::default();
         let out = match &q.statement {
@@ -155,6 +170,11 @@ impl<'a> Checker<'a> {
             table: out.table.name.clone(),
             params,
             columns: out.columns,
+            row_columns: if q.kind == QueryKind::Lwt {
+                out.table.columns.iter().map(lwt_column).collect()
+            } else {
+                Vec::new()
+            },
             span: q.span,
         })
     }

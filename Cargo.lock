@@ -221,6 +221,7 @@ dependencies = [
  "cqlc-codegen",
  "cqlc-core",
  "serde",
+ "serde_json",
  "tempfile",
  "toml",
 ]
@@ -250,6 +251,17 @@ dependencies = [
 
 [[package]]
 name = "cqlc-example-basic"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "futures",
+ "scylla",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "cqlc-example-shop"
 version = "0.1.0"
 dependencies = [
  "chrono",

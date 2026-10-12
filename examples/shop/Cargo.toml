@@ -1,0 +1,13 @@
+[package]
+name = "cqlc-example-shop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+scylla = { version = "1.9", features = ["chrono-04"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+futures = "0.3"

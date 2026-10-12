@@ -96,3 +96,90 @@ fn missing_config_is_a_usage_error() {
     assert_eq!(o.status.code(), Some(2));
     assert!(stderr(&o).contains("cqlc.toml"));
 }
+
+#[test]
+fn init_creates_a_project_that_generates() {
+    let dir = tempfile::tempdir().unwrap();
+    let o = cqlc(dir.path(), &["init"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    for f in ["cqlc.toml", "schema/schema.cql", "queries/users.cql"] {
+        assert!(dir.path().join(f).is_file(), "{f}");
+    }
+    let o = cqlc(dir.path(), &["generate"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let code = std::fs::read_to_string(dir.path().join("src/queries.rs")).unwrap();
+    assert!(code.contains("pub async fn get_user(") && code.contains("pub async fn create_user("));
+    assert!(cqlc(dir.path(), &["generate", "--check"]).status.success());
+}
+
+#[test]
+fn init_never_overwrites() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("cqlc.toml"), "mine").unwrap();
+    let o = cqlc(dir.path(), &["init"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("cqlc.toml")).unwrap(),
+        "mine"
+    );
+    assert!(
+        !dir.path().join("schema").exists(),
+        "nothing else is created"
+    );
+}
+
+#[test]
+fn json_messages_are_one_object_per_line_on_stdout() {
+    let dir = project(
+        "CREATE TABLE t (a uuid, b int, v text, PRIMARY KEY ((a), b));",
+        "-- name: Scan :many\nSELECT v FROM t WHERE b >= ?;\n-- name: Bad :one\nSELECT nope FROM t WHERE a = ?;",
+    );
+    let o = cqlc(dir.path(), &["check", "--message-format", "json"]);
+    assert_eq!(o.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&o.stdout);
+    let msgs: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(msgs.len(), 2, "{stdout}");
+    let codes: Vec<_> = msgs.iter().map(|m| m["code"].as_str().unwrap()).collect();
+    assert_eq!(codes, ["CQL201", "CQL102"]);
+    assert_eq!(msgs[1]["severity"], "error");
+    assert_eq!(msgs[1]["line"], 4);
+    assert_eq!(msgs[1]["column"], 8);
+    assert!(msgs[1]["file"].as_str().unwrap().ends_with("q.cql"));
+    assert!(
+        msgs[1]["help"]
+            .as_str()
+            .unwrap()
+            .contains("available columns")
+    );
+    // No human text on stdout.
+    assert!(!stdout.contains("-->"));
+}
+
+#[test]
+fn unsupported_config_version_is_rejected() {
+    let dir = project(SCHEMA, QUERY);
+    std::fs::write(
+        dir.path().join("cqlc.toml"),
+        "version = 2\nschema = \"schema\"\nqueries = \"queries\"\n[rust]\nout = \"o.rs\"\n",
+    )
+    .unwrap();
+    let o = cqlc(dir.path(), &["check"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(stderr(&o).contains("unsupported config version 2"));
+}
+
+#[test]
+fn unknown_config_keys_are_rejected() {
+    let dir = project(SCHEMA, QUERY);
+    std::fs::write(
+        dir.path().join("cqlc.toml"),
+        "schema = \"schema\"\nqueries = \"queries\"\ntypo = 1\n[rust]\nout = \"o.rs\"\n",
+    )
+    .unwrap();
+    let o = cqlc(dir.path(), &["check"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(stderr(&o).contains("typo"));
+}

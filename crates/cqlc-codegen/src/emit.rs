@@ -33,10 +33,11 @@ impl Emitter {
         self.line("}");
     }
 
-    /// Closes with a custom trailer such as `})?;`.
-    pub fn close_with(&mut self, trailer: impl AsRef<str>) {
+    /// Ends the current block and starts the next one, e.g. `} else {`.
+    pub fn reopen(&mut self, trailer: impl AsRef<str>) {
         self.indent -= 1;
         self.line(trailer);
+        self.indent += 1;
     }
 
     pub fn finish(self) -> String {

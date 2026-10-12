@@ -28,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     session
         .query_unpaged(
             "CREATE KEYSPACE IF NOT EXISTS cqlc_example WITH replication = \
-             {'class': 'SimpleStrategy', 'replication_factor': 1}",
+             {'class': 'NetworkTopologyStrategy', 'replication_factor': 1}",
             &[],
         )
         .await?;

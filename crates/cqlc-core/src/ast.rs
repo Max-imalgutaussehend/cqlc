@@ -2,6 +2,7 @@
 
 use crate::span::Span;
 use crate::types::CqlType;
+pub use crate::types::{Order, QueryKind, RelOp};
 
 /// An identifier with its normalized name: unquoted identifiers are
 /// lower-cased, quoted ones keep their exact spelling.
@@ -70,12 +71,6 @@ pub struct ColumnDef {
     pub ty_span: Span,
     pub is_static: bool,
     pub inline_primary_key: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Order {
-    Asc,
-    Desc,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -149,43 +144,6 @@ pub enum ExprKind {
     Udt(Vec<(Ident, Expr)>),
     /// `{}`: an empty set or map, decided by the expected type.
     EmptyBraces,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RelOp {
-    Eq,
-    Ne,
-    Lt,
-    Le,
-    Gt,
-    Ge,
-    In,
-    Contains,
-    ContainsKey,
-}
-
-impl RelOp {
-    pub fn is_range(self) -> bool {
-        matches!(self, RelOp::Lt | RelOp::Le | RelOp::Gt | RelOp::Ge)
-    }
-
-    pub fn is_eq_or_in(self) -> bool {
-        matches!(self, RelOp::Eq | RelOp::In)
-    }
-
-    pub fn suffix(self) -> &'static str {
-        match self {
-            RelOp::Eq => "eq",
-            RelOp::Ne => "ne",
-            RelOp::Lt => "lt",
-            RelOp::Le => "lte",
-            RelOp::Gt => "gt",
-            RelOp::Ge => "gte",
-            RelOp::In => "in",
-            RelOp::Contains => "contains",
-            RelOp::ContainsKey => "contains_key",
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -329,19 +287,6 @@ pub struct Delete {
     pub span: Span,
 }
 
-/// How a query's result is exposed in the generated API.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum QueryKind {
-    /// Zero or one row.
-    One,
-    /// All rows.
-    Many,
-    /// No result rows.
-    Exec,
-    /// Conditional write (lightweight transaction) with an `applied` result.
-    Lwt,
-}
-
 /// One annotated statement from a queries file.
 #[derive(Clone, Debug, PartialEq)]
 pub struct QueryDef {
@@ -352,5 +297,7 @@ pub struct QueryDef {
     pub cql: String,
     /// Number of `?` markers in the statement.
     pub marker_count: usize,
+    /// Warnings silenced with `-- allow: CQL201 ...`.
+    pub allow: Vec<crate::diagnostic::DiagnosticCode>,
     pub span: Span,
 }

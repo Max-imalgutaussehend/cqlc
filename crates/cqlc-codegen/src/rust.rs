@@ -10,7 +10,9 @@ use cqlc_core::span::Span;
 use cqlc_core::types::CqlType;
 use std::collections::{BTreeSet, HashMap};
 
+/// Which Rust types represent `timestamp`, `date` and `time`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TimeLibrary {
     /// `scylla::value::{CqlTimestamp, CqlDate, CqlTime}`
     #[default]
@@ -19,20 +21,42 @@ pub enum TimeLibrary {
     Chrono,
 }
 
+/// Code generation options. Start from [`Options::new`] and adjust.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Options {
+    /// Types for `timestamp`, `date` and `time`.
     pub time_library: TimeLibrary,
     /// Also generate `stream_*` functions for `:many` queries. They return
-    /// a `futures::Stream` and need the `futures` crate.
+    /// a `futures::stream::BoxStream` and need the `futures` crate.
     pub streams: bool,
 }
 
-impl Default for Options {
-    fn default() -> Self {
+impl Options {
+    /// The defaults: native driver time types, streams enabled.
+    pub fn new() -> Self {
         Options {
             time_library: TimeLibrary::Native,
             streams: true,
         }
+    }
+
+    /// Sets the time library.
+    pub fn time_library(mut self, time_library: TimeLibrary) -> Self {
+        self.time_library = time_library;
+        self
+    }
+
+    /// Enables or disables `stream_*` functions.
+    pub fn streams(mut self, streams: bool) -> Self {
+        self.streams = streams;
+        self
+    }
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options::new()
     }
 }
 
@@ -43,9 +67,31 @@ pub const OUTPUT_FORMAT: u32 = 1;
 
 const RESERVED_FNS: [&str; 2] = ["new", "session"];
 
-/// Generates one Rust module for all queries. Output is deterministic.
+/// Generates one Rust module for all queries. Output is deterministic: the
+/// same IR and options always produce the same text.
+///
+/// Fails with diagnostics when a type has no Rust mapping or generated names
+/// would clash.
 pub fn generate_rust(ir: &Ir, opts: &Options) -> Result<String, Vec<Diagnostic>> {
     let mut errors = Vec::new();
+    for q in &ir.queries {
+        if !matches!(
+            q.kind,
+            QueryKind::One | QueryKind::Many | QueryKind::Exec | QueryKind::Lwt
+        ) {
+            errors.push(Diagnostic::error(
+                DiagnosticCode::Unsupported,
+                q.span,
+                format!(
+                    "query kind of `{}` is not supported by this version of cqlc",
+                    q.name
+                ),
+            ));
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors);
+    }
     check_name_clashes(ir, opts, &mut errors);
     if !errors.is_empty() {
         return Err(errors);
@@ -285,6 +331,25 @@ fn query(q: &Query, ir: &Ir, opts: &Options) -> Result<Generated, Vec<Diagnostic
             (ident, t, c.name.as_str())
         })
         .collect();
+    let full_cols: Vec<(String, String, &str)> = if full_extra_column(q).is_some() {
+        q.row_columns
+            .iter()
+            .map(|c| {
+                let t = ty(&c.cql_type);
+                let mut ident = field_ident(&c.name);
+                if ident == "applied" {
+                    ident.push('_');
+                }
+                (
+                    ident,
+                    format!("::std::option::Option<{t}>"),
+                    c.name.as_str(),
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     for (what, names) in [
         (
             "parameter",
@@ -309,7 +374,7 @@ fn query(q: &Query, ir: &Ir, opts: &Options) -> Result<Generated, Vec<Diagnostic
         QueryKind::One => ":one",
         QueryKind::Many => ":many",
         QueryKind::Exec => ":exec",
-        QueryKind::Lwt => ":lwt",
+        _ => ":lwt",
     };
 
     e.line(format!("/// CQL of [`{snake}`] (`{}`).", q.name));
@@ -363,8 +428,22 @@ fn query(q: &Query, ir: &Ir, opts: &Options) -> Result<Generated, Vec<Diagnostic
                 e.close();
                 e.blank();
             }
+            if full_extra_column(q).is_some() {
+                e.line("#[derive(::scylla::DeserializeRow)]");
+                e.open(format!("struct {pascal}Full"));
+                e.line("#[scylla(rename = \"[applied]\")]");
+                e.line("applied: bool,");
+                for (field, t, cql_name) in &full_cols {
+                    if field != cql_name {
+                        e.line(format!("#[scylla(rename = {cql_name:?})]"));
+                    }
+                    e.line(format!("{field}: {t},"));
+                }
+                e.close();
+                e.blank();
+            }
         }
-        QueryKind::Exec => {}
+        _ => {}
     }
 
     let use_struct = params.len() > 1;
@@ -386,7 +465,7 @@ fn query(q: &Query, ir: &Ir, opts: &Options) -> Result<Generated, Vec<Diagnostic
         QueryKind::One => format!("::std::result::Result<::std::option::Option<{row}>, CqlcError>"),
         QueryKind::Many => format!("::std::result::Result<::std::vec::Vec<{row}>, CqlcError>"),
         QueryKind::Exec => "::std::result::Result<(), CqlcError>".to_string(),
-        QueryKind::Lwt => format!("::std::result::Result<{outcome}, CqlcError>"),
+        _ => format!("::std::result::Result<{outcome}, CqlcError>"),
     };
     let stream_ret = (q.kind == QueryKind::Many && opts.streams).then(|| {
         format!("::std::result::Result<::futures::stream::BoxStream<'static, ::std::result::Result<{row}, CqlcError>>, CqlcError>")
@@ -449,39 +528,60 @@ fn query(q: &Query, ir: &Ir, opts: &Options) -> Result<Generated, Vec<Diagnostic
                     e.line(format!("    .map_err({})", err("Deserialize")));
                 }
                 QueryKind::Lwt => {
+                    // The database reports back only `[applied]` for a successful write.
+                    // For a failed one, Cassandra returns the tested columns and ScyllaDB the
+                    // whole row, so recognize which shape came back.
+                    let extra = full_extra_column(q);
+                    let moves = |src: &str| -> String {
+                        cols.iter()
+                            .map(|(f, _, _)| format!(", {f}: {src}.{f}"))
+                            .collect()
+                    };
+                    let nones: String = cols
+                        .iter()
+                        .map(|(f, _, _)| format!(", {f}: None"))
+                        .collect();
+                    e.line("let specs = rows.column_specs();");
+                    e.open("if specs.len() <= 1");
+                    e.line(format!(
+                        "let applied = rows.first_row::<{pascal}Applied>().map_err({})?;",
+                        err("Deserialize")
+                    ));
+                    e.line(format!(
+                        "Ok({outcome} {{ applied: applied.applied{nones} }})"
+                    ));
+                    if let Some(extra) = &extra {
+                        e.reopen(format!(
+                            "}} else if specs.iter().any(|c| c.name() == {extra:?}) {{"
+                        ));
+                        e.line(format!(
+                            "let full = rows.first_row::<{pascal}Full>().map_err({})?;",
+                            err("Deserialize")
+                        ));
+                        e.line(format!(
+                            "Ok({outcome} {{ applied: full.applied{} }})",
+                            moves("full")
+                        ));
+                    }
                     if cols.is_empty() {
+                        e.reopen("} else {");
                         e.line(format!(
                             "let applied = rows.first_row::<{pascal}Applied>().map_err({})?;",
                             err("Deserialize")
                         ));
                         e.line(format!("Ok({outcome} {{ applied: applied.applied }})"));
                     } else {
-                        e.open("if rows.column_specs().len() <= 1");
+                        e.reopen("} else {");
                         e.line(format!(
-                            "let applied = rows.first_row::<{pascal}Applied>().map_err({})?;",
+                            "let current = rows.first_row::<{pascal}Current>().map_err({})?;",
                             err("Deserialize")
                         ));
-                        let nones: String = cols
-                            .iter()
-                            .map(|(f, _, _)| format!(", {f}: None"))
-                            .collect();
                         e.line(format!(
-                            "Ok({outcome} {{ applied: applied.applied{nones} }})"
+                            "Ok({outcome} {{ applied: current.applied{} }})",
+                            moves("current")
                         ));
-                        e.close_with("} else {");
-                        e.line(format!(
-                            "    let current = rows.first_row::<{pascal}Current>().map_err({})?;",
-                            err("Deserialize")
-                        ));
-                        let moves: String = cols
-                            .iter()
-                            .map(|(f, _, _)| format!(", {f}: current.{f}"))
-                            .collect();
-                        e.line(format!(
-                            "    Ok({outcome} {{ applied: current.applied{moves} }})"
-                        ));
-                        e.line("}");
                     }
+                    e.close();
                 }
                 _ => unreachable!(),
             }
@@ -515,7 +615,7 @@ fn query(q: &Query, ir: &Ir, opts: &Options) -> Result<Generated, Vec<Diagnostic
             e.line("///");
             e.line("/// A conditional write that is not applied is not an error: check `applied`.");
         }
-        QueryKind::Exec => {}
+        _ => {}
     }
     e.line("///");
     e.line("/// Prepares the statement on every call; use [`Queries`] to prepare once.");
@@ -582,6 +682,19 @@ fn query(q: &Query, ir: &Ir, opts: &Options) -> Result<Generated, Vec<Diagnostic
         ret,
         stream_ret,
     })
+}
+
+/// A table column that a conditional write reports only when the server
+/// returns the whole row (ScyllaDB); `None` if the tested columns already are
+/// the whole row.
+fn full_extra_column(q: &Query) -> Option<String> {
+    if q.kind != QueryKind::Lwt {
+        return None;
+    }
+    q.row_columns
+        .iter()
+        .find(|c| !q.columns.iter().any(|x| x.name == c.name))
+        .map(|c| c.name.clone())
 }
 
 /// A struct holding every statement prepared once.
@@ -660,6 +773,7 @@ fn param_doc(p: &Param) -> String {
         ParamSource::PerPartitionLimit => "`PER PARTITION LIMIT`".to_string(),
         ParamSource::Ttl => "`USING TTL` (seconds)".to_string(),
         ParamSource::Timestamp => "`USING TIMESTAMP` (microseconds)".to_string(),
+        _ => "bind value".to_string(),
     };
     if p.nullable {
         format!("{what}. `None` binds NULL (a delete marker), it does not leave the value unset.")
@@ -742,8 +856,9 @@ fn check_name_clashes(ir: &Ir, opts: &Options, errors: &mut Vec<Diagnostic>) {
                 format!("{pascal}Outcome"),
                 format!("{pascal}Applied"),
                 format!("{pascal}Current"),
+                format!("{pascal}Full"),
             ]),
-            QueryKind::Exec => {}
+            _ => {}
         }
         if q.params.len() > 1 {
             type_names.push(format!("{pascal}Params"));
@@ -765,7 +880,7 @@ fn check_name_clashes(ir: &Ir, opts: &Options, errors: &mut Vec<Diagnostic>) {
 
 /// Maps a CQL type to a Rust type path. `ord` demands a type with a total
 /// order (set elements and map keys are stored in `BTreeSet`/`BTreeMap`).
-pub fn rust_type(ty: &CqlType, opts: &Options, ord: bool, udts: &[Udt]) -> Result<String, String> {
+fn rust_type(ty: &CqlType, opts: &Options, ord: bool, udts: &[Udt]) -> Result<String, String> {
     use CqlType::*;
     let chrono = opts.time_library == TimeLibrary::Chrono;
     if ord && !is_ord(ty, udts) {
@@ -817,6 +932,11 @@ pub fn rust_type(ty: &CqlType, opts: &Options, ord: bool, udts: &[Udt]) -> Resul
                 return Err(format!("unknown user-defined type `{name}`"));
             }
             to_pascal_case(name)
+        }
+        _ => {
+            return Err(format!(
+                "type `{ty}` is not supported by this version of cqlc"
+            ));
         }
     })
 }

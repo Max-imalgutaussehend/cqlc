@@ -71,12 +71,14 @@ pub fn parse_queries(file: FileId, src: &str) -> (Vec<QueryDef>, Vec<Diagnostic>
                     diags.push(d);
                     continue;
                 }
+                let allow = allow_list(&comments, &p, &mut diags);
                 out.push(QueryDef {
                     name,
                     kind,
                     statement: p.statement,
                     cql: p.cql,
                     marker_count: p.marker_count,
+                    allow,
                     span: p.span,
                 });
             }
@@ -113,6 +115,37 @@ fn check_kind(kind: QueryKind, p: &Parsed) -> PResult<()> {
     } else {
         Err(Diagnostic::error(DiagnosticCode::Annotation, p.span, msg).with_help(help))
     }
+}
+
+/// `-- allow: CQL201, CQL202` before a statement silences those warnings.
+fn allow_list(
+    comments: &[Comment],
+    p: &Parsed,
+    diags: &mut Vec<Diagnostic>,
+) -> Vec<DiagnosticCode> {
+    let mut out = Vec::new();
+    for c in comments
+        .iter()
+        .filter(|c| c.span.end <= p.span.start && c.span.start >= p.lo)
+    {
+        let Some(list) = c.text.trim().strip_prefix("allow:") else {
+            continue;
+        };
+        for item in list.split([',', ' ']).filter(|i| !i.is_empty()) {
+            match DiagnosticCode::parse_warning(item) {
+                Some(code) => out.push(code),
+                None => diags.push(
+                    Diagnostic::error(
+                        DiagnosticCode::Annotation,
+                        c.span,
+                        format!("`{item}` is not a warning code that can be allowed"),
+                    )
+                    .with_help("allowed: CQL201, CQL202, CQL203, CQL204, CQL205"),
+                ),
+            }
+        }
+    }
+    out
 }
 
 fn annotation(comments: &[Comment], p: &Parsed) -> PResult<(Ident, QueryKind)> {

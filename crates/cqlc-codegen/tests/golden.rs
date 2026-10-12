@@ -18,9 +18,11 @@ fn inputs(dir: &Path) -> Vec<Input> {
     files.sort();
     files
         .into_iter()
-        .map(|p| Input {
-            name: p.display().to_string(),
-            text: std::fs::read_to_string(&p).unwrap(),
+        .map(|p| {
+            Input::new(
+                p.display().to_string(),
+                std::fs::read_to_string(&p).unwrap(),
+            )
         })
         .collect()
 }
@@ -34,10 +36,7 @@ fn generate(schema: &[Input], queries: &[Input], opts: &Options) -> String {
 #[test]
 fn example_matches_committed_output() {
     let dir = example_dir();
-    let opts = Options {
-        time_library: TimeLibrary::Chrono,
-        ..Options::default()
-    };
+    let opts = Options::new().time_library(TimeLibrary::Chrono);
     let out = generate(
         &inputs(&dir.join("schema")),
         &inputs(&dir.join("queries")),
@@ -60,14 +59,8 @@ fn output_is_deterministic() {
 
 fn one(schema: &str, query: &str, opts: &Options) -> Result<String, Vec<String>> {
     let c = compile(
-        &[Input {
-            name: "s.cql".into(),
-            text: schema.into(),
-        }],
-        &[Input {
-            name: "q.cql".into(),
-            text: query.into(),
-        }],
+        &[Input::new("s.cql", schema)],
+        &[Input::new("q.cql", query)],
     );
     assert!(!c.has_errors(), "{:?}", c.diagnostics);
     generate_rust(&c.ir, opts).map_err(|d| d.into_iter().map(|d| d.message).collect())
@@ -120,15 +113,7 @@ fn time_library_switches_types() {
     let native = one(schema, q, &Options::default()).unwrap();
     assert!(native.contains("::scylla::value::CqlTimestamp"));
     assert!(native.contains("::scylla::value::CqlDate"));
-    let chrono = one(
-        schema,
-        q,
-        &Options {
-            time_library: TimeLibrary::Chrono,
-            ..Options::default()
-        },
-    )
-    .unwrap();
+    let chrono = one(schema, q, &Options::new().time_library(TimeLibrary::Chrono)).unwrap();
     assert!(chrono.contains("::chrono::DateTime<::chrono::Utc>"));
     assert!(chrono.contains("::chrono::NaiveDate"));
 }
@@ -192,5 +177,167 @@ fn type_matrix_matches_committed_output() {
     assert_eq!(
         out, expected,
         "run `cqlc generate -c tests/compile-types/cqlc.toml`"
+    );
+}
+
+#[test]
+fn shop_example_matches_committed_output() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/shop");
+    let opts = Options::new().time_library(TimeLibrary::Chrono);
+    let out = generate(
+        &inputs(&dir.join("schema")),
+        &inputs(&dir.join("queries")),
+        &opts,
+    );
+    let expected = std::fs::read_to_string(dir.join("src/queries.rs")).unwrap();
+    assert_eq!(
+        out, expected,
+        "run `cqlc generate -c examples/shop/cqlc.toml`"
+    );
+}
+
+const UDT_SCHEMA: &str = "
+CREATE TYPE address (street text, zip int);
+CREATE TYPE geo (lat double, lon double);
+CREATE TABLE t (
+    k int PRIMARY KEY, v text, home frozen<address>, spot frozen<geo>,
+    homes set<frozen<address>>, spots set<frozen<geo>>
+);";
+
+#[test]
+fn udts_become_structs_and_only_used_ones_are_emitted() {
+    let out = one(
+        UDT_SCHEMA,
+        "-- name: A :one\nSELECT home FROM t WHERE k = ?;",
+        &Options::default(),
+    )
+    .unwrap();
+    assert!(out.contains("pub struct Address {"), "{out}");
+    assert!(out.contains("pub street: ::std::option::Option<::std::string::String>,"));
+    assert!(out.contains("::scylla::SerializeValue, ::scylla::DeserializeValue"));
+    assert!(
+        !out.contains("pub struct Geo"),
+        "unused UDTs are not generated"
+    );
+    // Fully ordered fields: the struct can be a set element or map key.
+    assert!(out.contains("PartialEq, Eq, PartialOrd, Ord"));
+}
+
+#[test]
+fn udts_with_floats_are_unorderable() {
+    let out = one(
+        UDT_SCHEMA,
+        "-- name: A :one\nSELECT spot FROM t WHERE k = ?;",
+        &Options::default(),
+    )
+    .unwrap();
+    assert!(out.contains("pub struct Geo"));
+    assert!(!out.contains("Eq, PartialOrd, Ord"));
+    let err = one(
+        UDT_SCHEMA,
+        "-- name: A :one\nSELECT spots FROM t WHERE k = ?;",
+        &Options::default(),
+    )
+    .unwrap_err();
+    assert!(err[0].contains("no total order"), "{err:?}");
+    // A set of an orderable UDT is fine.
+    one(
+        UDT_SCHEMA,
+        "-- name: A :one\nSELECT homes FROM t WHERE k = ?;",
+        &Options::default(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn lwt_outcome_shape() {
+    let schema = "CREATE TABLE t (k int PRIMARY KEY, v text, applied boolean);";
+    let out = one(
+        schema,
+        "-- name: Cas :lwt\nUPDATE t SET v = ? WHERE k = ? IF applied = true;",
+        &Options::default(),
+    )
+    .unwrap();
+    assert!(out.contains("pub struct CasOutcome"));
+    assert!(out.contains("pub applied: bool,"));
+    // A column called `applied` must not clash with the outcome flag.
+    assert!(out.contains("pub applied_:"), "{out}");
+    assert!(out.contains("#[scylla(rename = \"[applied]\")]"));
+    assert!(out.contains("if specs.len() <= 1"));
+    // ScyllaDB reports the whole row for a failed write; Cassandra only the tested column.
+    assert!(out.contains("struct CasFull") && out.contains("struct CasCurrent"));
+    let out = one(
+        schema,
+        "-- name: Del :lwt\nDELETE FROM t WHERE k = ? IF EXISTS;",
+        &Options::default(),
+    )
+    .unwrap();
+    assert!(!out.contains("DelCurrent"), "IF EXISTS tests no columns");
+    assert!(
+        out.contains("struct DelFull"),
+        "but ScyllaDB returns the whole row"
+    );
+}
+
+#[test]
+fn streams_can_be_switched_off() {
+    let schema = "CREATE TABLE t (k int, c int, v text, PRIMARY KEY (k, c));";
+    let q = "-- name: Many :many\nSELECT v FROM t WHERE k = ?;";
+    let on = one(schema, q, &Options::default()).unwrap();
+    assert!(on.contains("pub async fn stream_many("));
+    assert!(on.contains("::futures::stream::BoxStream<'static"));
+    let off = one(schema, q, &Options::new().streams(false)).unwrap();
+    assert!(!off.contains("stream_many") && !off.contains("futures"));
+}
+
+#[test]
+fn queries_struct_prepares_every_statement_once() {
+    let schema = "CREATE TABLE t (k int PRIMARY KEY, v text);";
+    let out = one(
+        schema,
+        "-- name: A :one\nSELECT v FROM t WHERE k = ?;\n-- name: B :exec\nDELETE FROM t WHERE k = ?;",
+        &Options::default(),
+    )
+    .unwrap();
+    assert!(out.contains("pub struct Queries {"));
+    assert!(out.contains("pub async fn new(session: ::std::sync::Arc<"));
+    assert!(out.contains("let a = session.prepare(A_CQL)"));
+    assert!(out.contains("pub async fn b(&self, k: i32)"));
+    assert!(out.contains("b_with(&self.session, &self.b, k)"));
+}
+
+#[test]
+fn generated_names_must_not_clash() {
+    let schema =
+        "CREATE TYPE foo_row (a int); CREATE TABLE t (k int PRIMARY KEY, f frozen<foo_row>);";
+    let err = one(
+        schema,
+        "-- name: Foo :one\nSELECT f FROM t WHERE k = ?;",
+        &Options::default(),
+    )
+    .unwrap_err();
+    assert!(err[0].contains("FooRow"), "{err:?}");
+    let schema = "CREATE TABLE t (k int PRIMARY KEY, v text);";
+    let err = one(
+        schema,
+        "-- name: Session :one\nSELECT v FROM t WHERE k = ?;",
+        &Options::default(),
+    )
+    .unwrap_err();
+    assert!(err[0].contains("reserved"), "{err:?}");
+}
+
+#[test]
+fn output_header_has_a_format_version_instead_of_the_crate_version() {
+    let out = one(
+        "CREATE TABLE t (k int PRIMARY KEY);",
+        "-- name: A :exec\nDELETE FROM t WHERE k = ?;",
+        &Options::default(),
+    )
+    .unwrap();
+    assert!(
+        out.starts_with("// @generated by cqlc (output format 1)."),
+        "{}",
+        &out[..80]
     );
 }

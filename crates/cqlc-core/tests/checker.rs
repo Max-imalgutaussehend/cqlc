@@ -24,14 +24,8 @@ CREATE TABLE with_udt (id int PRIMARY KEY, home frozen<address>, note text);
 
 fn run(queries: &str) -> Compilation {
     compile(
-        &[Input {
-            name: "schema.cql".into(),
-            text: SCHEMA.into(),
-        }],
-        &[Input {
-            name: "queries.cql".into(),
-            text: queries.into(),
-        }],
+        &[Input::new("schema.cql", SCHEMA)],
+        &[Input::new("queries.cql", queries)],
     )
 }
 
@@ -294,33 +288,18 @@ fn too_many_bind_markers() {
         names[..16].join(", "),
         &marks[..marks.len() - 3]
     );
-    let c = compile(
-        &[Input {
-            name: "s.cql".into(),
-            text: schema,
-        }],
-        &[Input {
-            name: "q.cql".into(),
-            text: q,
-        }],
-    );
+    let c = compile(&[Input::new("s.cql", schema)], &[Input::new("q.cql", q)]);
     assert_eq!(codes(&c), ["CQL108"], "{:?}", c.diagnostics);
 }
 
 #[test]
 fn schema_errors() {
     let bad = |ddl: &str| -> Vec<&'static str> {
-        compile(
-            &[Input {
-                name: "s.cql".into(),
-                text: ddl.into(),
-            }],
-            &[],
-        )
-        .diagnostics
-        .iter()
-        .map(|d| d.code.as_str())
-        .collect()
+        compile(&[Input::new("s.cql", ddl)], &[])
+            .diagnostics
+            .iter()
+            .map(|d| d.code.as_str())
+            .collect()
     };
     assert_eq!(bad("CREATE TABLE t (a int, b int);"), ["CQL109"]);
     assert_eq!(bad("CREATE TABLE t (a int, PRIMARY KEY (z));"), ["CQL109"]);
@@ -351,18 +330,7 @@ fn schema_errors() {
 fn keyspace_qualified_names() {
     let schema =
         "CREATE TABLE a.t (k int PRIMARY KEY, v int); CREATE TABLE b.t (k int PRIMARY KEY, v int);";
-    let run = |q: &str| {
-        compile(
-            &[Input {
-                name: "s.cql".into(),
-                text: schema.into(),
-            }],
-            &[Input {
-                name: "q.cql".into(),
-                text: q.into(),
-            }],
-        )
-    };
+    let run = |q: &str| compile(&[Input::new("s.cql", schema)], &[Input::new("q.cql", q)]);
     let c = run("-- name: Q :one\nSELECT v FROM a.t WHERE k = ?;");
     assert!(c.diagnostics.is_empty());
     assert_eq!(c.ir.queries[0].keyspace.as_deref(), Some("a"));

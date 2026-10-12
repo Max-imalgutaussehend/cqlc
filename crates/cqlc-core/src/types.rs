@@ -2,37 +2,66 @@
 
 use std::fmt;
 
+/// A CQL data type.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum CqlType {
+    /// `ascii`
     Ascii,
+    /// `bigint`
     BigInt,
+    /// `blob`
     Blob,
+    /// `boolean`
     Boolean,
+    /// `counter`
     Counter,
+    /// `date`
     Date,
+    /// `decimal`
     Decimal,
+    /// `double`
     Double,
+    /// `duration`
     Duration,
+    /// `float`
     Float,
+    /// `inet`
     Inet,
+    /// `int`
     Int,
+    /// `smallint`
     SmallInt,
+    /// `text` / `varchar`
     Text,
+    /// `time`
     Time,
+    /// `timestamp`
     Timestamp,
+    /// `timeuuid`
     TimeUuid,
+    /// `tinyint`
     TinyInt,
+    /// `uuid`
     Uuid,
+    /// `varint`
     VarInt,
+    /// `list<T>`
     List(Box<CqlType>),
+    /// `set<T>`
     Set(Box<CqlType>),
+    /// `map<K, V>`
     Map(Box<CqlType>, Box<CqlType>),
+    /// `tuple<A, B, ...>`
     Tuple(Vec<CqlType>),
+    /// `frozen<T>`
     Frozen(Box<CqlType>),
+    /// A user-defined type, by name.
     Udt(String),
 }
 
 impl CqlType {
+    /// Maps a lower-case primitive type name (`int`, `text`, ...) to its type.
     pub fn from_primitive(name: &str) -> Option<CqlType> {
         Some(match name {
             "ascii" => CqlType::Ascii,
@@ -67,6 +96,7 @@ impl CqlType {
         }
     }
 
+    /// Whether the type is a number (including `counter`).
     pub fn is_numeric(&self) -> bool {
         use CqlType::*;
         matches!(
@@ -75,6 +105,7 @@ impl CqlType {
         )
     }
 
+    /// Whether the type is a list, set or map.
     pub fn is_collection(&self) -> bool {
         matches!(
             self.unfrozen(),
@@ -82,10 +113,12 @@ impl CqlType {
         )
     }
 
+    /// Whether the type is wrapped in `frozen<>`.
     pub fn is_frozen(&self) -> bool {
         matches!(self, CqlType::Frozen(_))
     }
 
+    /// Whether a user-defined type occurs anywhere inside the type.
     pub fn contains_udt(&self) -> bool {
         match self {
             CqlType::Udt(_) => true,
@@ -138,4 +171,79 @@ impl fmt::Display for CqlType {
         };
         f.write_str(s)
     }
+}
+
+/// Sort direction of a clustering column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Order {
+    /// Ascending.
+    Asc,
+    /// Descending.
+    Desc,
+}
+
+/// Comparison operator of a relation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RelOp {
+    /// `=`
+    Eq,
+    /// `!=`
+    Ne,
+    /// `<`
+    Lt,
+    /// `<=`
+    Le,
+    /// `>`
+    Gt,
+    /// `>=`
+    Ge,
+    /// `IN`
+    In,
+    /// `CONTAINS`
+    Contains,
+    /// `CONTAINS KEY`
+    ContainsKey,
+}
+
+impl RelOp {
+    /// `<`, `<=`, `>` or `>=`.
+    pub fn is_range(self) -> bool {
+        matches!(self, RelOp::Lt | RelOp::Le | RelOp::Gt | RelOp::Ge)
+    }
+
+    /// `=` or `IN`.
+    pub fn is_eq_or_in(self) -> bool {
+        matches!(self, RelOp::Eq | RelOp::In)
+    }
+
+    /// Short name used to disambiguate parameter names (`gte`, `in`, ...).
+    pub fn suffix(self) -> &'static str {
+        match self {
+            RelOp::Eq => "eq",
+            RelOp::Ne => "ne",
+            RelOp::Lt => "lt",
+            RelOp::Le => "lte",
+            RelOp::Gt => "gt",
+            RelOp::Ge => "gte",
+            RelOp::In => "in",
+            RelOp::Contains => "contains",
+            RelOp::ContainsKey => "contains_key",
+        }
+    }
+}
+
+/// How a query's result is exposed in the generated API.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum QueryKind {
+    /// Zero or one row (`:one`).
+    One,
+    /// All rows (`:many`).
+    Many,
+    /// No result rows (`:exec`).
+    Exec,
+    /// Conditional write with an `applied` result (`:lwt`).
+    Lwt,
 }

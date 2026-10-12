@@ -3,15 +3,20 @@
 use crate::span::{SourceMap, Span};
 use std::fmt::Write as _;
 
+/// How serious a diagnostic is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Severity {
+    /// The query is rejected.
     Error,
+    /// Advice; the query is still generated.
     Warning,
 }
 
 /// Stable diagnostic codes. `CQL0xx` are syntax problems, `CQL1xx` are
 /// errors from schema resolution / type checking, `CQL2xx` are warnings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum DiagnosticCode {
     /// Syntax error.
     Syntax,
@@ -60,6 +65,23 @@ pub enum DiagnosticCode {
 }
 
 impl DiagnosticCode {
+    /// Every warning code, i.e. the ones `-- allow:` may silence.
+    pub const WARNINGS: [DiagnosticCode; 5] = [
+        DiagnosticCode::BroadScan,
+        DiagnosticCode::AllowFiltering,
+        DiagnosticCode::NonKeyRestriction,
+        DiagnosticCode::ClusteringGap,
+        DiagnosticCode::OrderBy,
+    ];
+
+    /// Parses a code such as `CQL201` (case-insensitive) if it is a warning.
+    pub fn parse_warning(s: &str) -> Option<DiagnosticCode> {
+        Self::WARNINGS
+            .into_iter()
+            .find(|c| c.as_str().eq_ignore_ascii_case(s))
+    }
+
+    /// The code as shown to users, e.g. `CQL201`.
     pub fn as_str(self) -> &'static str {
         use DiagnosticCode::*;
         match self {
@@ -89,16 +111,24 @@ impl DiagnosticCode {
     }
 }
 
+/// One error or warning with its location.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Diagnostic {
+    /// Stable code, e.g. `CQL102`.
     pub code: DiagnosticCode,
+    /// Error or warning.
     pub severity: Severity,
+    /// What is wrong.
     pub message: String,
+    /// Where it is wrong.
     pub span: Span,
+    /// How to fix it, if there is a suggestion.
     pub help: Option<String>,
 }
 
 impl Diagnostic {
+    /// Creates an error.
     pub fn error(code: DiagnosticCode, span: Span, message: impl Into<String>) -> Self {
         Diagnostic {
             code,
@@ -109,6 +139,7 @@ impl Diagnostic {
         }
     }
 
+    /// Creates a warning.
     pub fn warning(code: DiagnosticCode, span: Span, message: impl Into<String>) -> Self {
         Diagnostic {
             severity: Severity::Warning,
@@ -116,11 +147,13 @@ impl Diagnostic {
         }
     }
 
+    /// Adds a help message.
     pub fn with_help(mut self, help: impl Into<String>) -> Self {
         self.help = Some(help.into());
         self
     }
 
+    /// Whether this is an error.
     pub fn is_error(&self) -> bool {
         self.severity == Severity::Error
     }
@@ -132,7 +165,9 @@ impl Diagnostic {
         let line_text = file.line_text(line);
         let line_start = file.line_start(line);
         let line_end = line_start + line_text.len();
-        let span_end = (self.span.end as usize).clamp(self.span.start as usize, line_end);
+        let span_end = (self.span.end as usize)
+            .min(line_end)
+            .max(self.span.start as usize);
         let width = file
             .text
             .get(self.span.start as usize..span_end)
