@@ -4,9 +4,9 @@ members = ["crates/*", "examples/basic", "examples/shop", "tests/compile-types"]
 default-members = ["crates/*"]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 repository = "https://github.com/Max-imalgutaussehend/cqlc"
 homepage = "https://github.com/Max-imalgutaussehend/cqlc"
 documentation = "https://docs.rs/cqlc-core"
@@ -16,8 +16,8 @@ keywords = ["cassandra", "scylla", "cql", "codegen", "sqlc"]
 categories = ["database", "development-tools"]
 
 [workspace.dependencies]
-cqlc-core = { path = "crates/cqlc-core", version = "1.0.0" }
-cqlc-codegen = { path = "crates/cqlc-codegen", version = "1.0.0" }
+cqlc-core = { path = "crates/cqlc-core", version = "1.0.1" }
+cqlc-codegen = { path = "crates/cqlc-codegen", version = "1.0.1" }
 
 [profile.release]
 lto = "thin"

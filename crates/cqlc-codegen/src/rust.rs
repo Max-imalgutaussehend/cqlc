@@ -223,7 +223,7 @@ fn udt_struct(udt: &Udt, ir: &Ir, opts: &Options) -> Result<String, Vec<Diagnost
     }
     e.line(format!(
         "/// User-defined type `{}`. Every field may be absent.",
-        udt.name
+        doc(&udt.name)
     ));
     e.line(format!(
         "#[derive({derives}, ::scylla::SerializeValue, ::scylla::DeserializeValue)]"
@@ -377,7 +377,7 @@ fn query(q: &Query, ir: &Ir, opts: &Options) -> Result<Generated, Vec<Diagnostic
         _ => ":lwt",
     };
 
-    e.line(format!("/// CQL of [`{snake}`] (`{}`).", q.name));
+    e.line(format!("/// CQL of [`{snake}`] (`{}`).", doc(&q.name)));
     e.line(format!("pub const {cql_const}: &str = {:?};", q.cql));
     e.blank();
 
@@ -454,7 +454,7 @@ fn query(q: &Query, ir: &Ir, opts: &Options) -> Result<Generated, Vec<Diagnostic
         e.line("#[derive(Debug, Clone, PartialEq)]");
         e.open(format!("pub struct {params_ty}"));
         for (field, t, p) in &params {
-            e.line(format!("/// {}", param_doc(p)));
+            e.line(format!("/// {}", doc(&param_doc(p))));
             e.line(format!("pub {field}: {t},"));
         }
         e.close();
@@ -591,10 +591,13 @@ fn query(q: &Query, ir: &Ir, opts: &Options) -> Result<Generated, Vec<Diagnostic
     e.blank();
 
     // Public function: prepare, then run.
-    e.line(format!("/// Runs query `{}` (`{kind_name}`).", q.name));
+    e.line(format!(
+        "/// Runs query `{}` (`{kind_name}`).",
+        doc(&q.name)
+    ));
     e.line("///");
     e.line("/// ```text");
-    e.line(format!("/// {}", q.cql));
+    e.line(format!("/// {}", doc(&q.cql)));
     e.line("/// ```");
     match q.kind {
         QueryKind::One => {
@@ -758,6 +761,33 @@ fn queries_struct(items: &[Generated]) -> String {
     }
     e.close();
     e.finish()
+}
+
+/// Makes arbitrary text safe inside a `///` line: no line breaks that would
+/// turn the rest into code, and no control or bidirectional-formatting
+/// characters that could hide code from a reader.
+fn doc(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push(' '),
+            c if c.is_control()
+                || matches!(
+                    c,
+                    '\u{200b}'..='\u{200f}'
+                        | '\u{2028}'..='\u{202e}'
+                        | '\u{2060}'..='\u{2069}'
+                        | '\u{feff}'
+                ) =>
+            {
+                out.push_str(&format!("\\u{{{:04x}}}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn param_doc(p: &Param) -> String {

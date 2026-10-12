@@ -183,3 +183,48 @@ fn unknown_config_keys_are_rejected() {
     assert_eq!(o.status.code(), Some(2));
     assert!(stderr(&o).contains("typo"));
 }
+
+#[test]
+fn byte_order_marks_and_crlf_line_endings_are_accepted() {
+    let plain = project(SCHEMA, QUERY);
+    assert!(cqlc(plain.path(), &["generate"]).status.success());
+    let expected = std::fs::read_to_string(plain.path().join("src/gen/queries.rs")).unwrap();
+
+    // Same project as Windows editors write it: BOM and CRLF.
+    let windows = |text: &str| format!("\u{feff}{}", text.replace('\n', "\r\n"));
+    let dir = project(&windows(SCHEMA), &windows(QUERY));
+    let o = cqlc(dir.path(), &["generate"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let got = std::fs::read_to_string(dir.path().join("src/gen/queries.rs")).unwrap();
+    assert_eq!(
+        got, expected,
+        "line endings and BOM must not change the output"
+    );
+}
+
+#[test]
+fn generate_leaves_no_temporary_files_behind() {
+    let dir = project(SCHEMA, QUERY);
+    assert!(cqlc(dir.path(), &["generate"]).status.success());
+    let names: Vec<_> = std::fs::read_dir(dir.path().join("src/gen"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["queries.rs"]);
+}
+
+#[test]
+fn a_crafted_query_does_not_crash_the_process() {
+    let nest = "[".repeat(200_000);
+    let dir = project(
+        SCHEMA,
+        &format!("-- name: Q :exec\nINSERT INTO t (k) VALUES ({nest});"),
+    );
+    let o = cqlc(dir.path(), &["check"]);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert!(stderr(&o).contains("nested too deeply"));
+    assert!(
+        stderr(&o).len() < 2_000,
+        "diagnostic output must stay small"
+    );
+}

@@ -10,7 +10,9 @@
 4. Commit, then tag and push: `git tag v1.2.3 && git push origin v1.2.3`.
 5. The `Release` workflow verifies tag, version and changelog, builds binaries for Linux, macOS
    and Windows, publishes `cqlc-core`, `cqlc-codegen` and `cqlc` to crates.io in that order, and
-   creates the GitHub release from the changelog. It needs the repository secret
-   `CARGO_REGISTRY_TOKEN` and a `release` environment (use it to require approval).
+   creates the GitHub release from the changelog. Without the repository secret
+   `CARGO_REGISTRY_TOKEN` it skips crates.io (publish locally with `cargo publish -p cqlc-core`,
+   then `cqlc-codegen`, then `cqlc`, waiting for the index in between). The `release`
+   environment can be used to require approval.
 
 A published version cannot be deleted from crates.io, only yanked, so do not skip step 2.

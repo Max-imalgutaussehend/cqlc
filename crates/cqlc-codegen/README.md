@@ -18,4 +18,4 @@ assert!(code.contains("pub async fn get("));
 
 Output is deterministic, and its layout is versioned by `OUTPUT_FORMAT`.
 
-Licensed under MIT or Apache-2.0, at your option.
+Licensed under the [Apache License, Version 2.0](LICENSE).

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Max-imalgutaussehend/cqlc/actions/workflows/ci.yml/badge.svg)](https://github.com/Max-imalgutaussehend/cqlc/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/cqlc.svg)](https://crates.io/crates/cqlc)
-[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](#license)
 
 A static CQL analyzer and Rust code generator for Cassandra-compatible databases, in the spirit of
 [sqlc](https://sqlc.dev).
@@ -193,7 +193,9 @@ one with `-- allow: CQL201`.
 
 ## License
 
-Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at
-your option. Unless you explicitly state otherwise, any contribution intentionally submitted for
-inclusion in the work by you shall be dual licensed as above, without any additional terms or
-conditions.
+Licensed under the [Apache License, Version 2.0](LICENSE). Unless you explicitly state otherwise,
+any contribution intentionally submitted for inclusion in the work by you, as defined in the
+Apache-2.0 license, shall be licensed as above, without any additional terms or conditions.
+
+**The code cqlc generates for you is not covered by this license.** It is output derived from
+your own schema and queries; use and license it as you like.

@@ -11,6 +11,10 @@ use crate::types::CqlType;
 
 type PResult<T> = Result<T, Diagnostic>;
 
+/// How deeply expressions and types may nest. Real queries stay far below this;
+/// the limit keeps crafted input from overflowing the stack.
+const MAX_DEPTH: usize = 64;
+
 /// A parsed statement plus the information needed to match annotations.
 #[derive(Debug)]
 struct Parsed {
@@ -203,6 +207,8 @@ struct Parser<'a> {
     tokens: Vec<Token>,
     pos: usize,
     markers: usize,
+    /// Current nesting depth of expressions and types.
+    depth: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -212,6 +218,7 @@ impl<'a> Parser<'a> {
             tokens,
             pos: 0,
             markers: 0,
+            depth: 0,
         }
     }
 
@@ -600,6 +607,10 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type(&mut self) -> PResult<CqlType> {
+        self.nested("type", Self::parse_type_inner)
+    }
+
+    fn parse_type_inner(&mut self) -> PResult<CqlType> {
         let id = self.ident()?;
         let generic = |p: &mut Self| -> PResult<()> { p.expect(&TokenKind::Lt).map(|_| ()) };
         let close = |p: &mut Self| -> PResult<()> { p.expect(&TokenKind::Gt).map(|_| ()) };
@@ -868,7 +879,26 @@ impl<'a> Parser<'a> {
 
     // ----- expressions ---------------------------------------------------
 
+    /// Runs `f` one nesting level deeper, failing instead of overflowing the stack.
+    fn nested<T>(&mut self, what: &str, f: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
+        if self.depth >= MAX_DEPTH {
+            return Err(Diagnostic::error(
+                DiagnosticCode::Syntax,
+                self.peek().span,
+                format!("{what} is nested too deeply (limit {MAX_DEPTH})"),
+            ));
+        }
+        self.depth += 1;
+        let result = f(self);
+        self.depth -= 1;
+        result
+    }
+
     fn parse_expr(&mut self) -> PResult<Expr> {
+        self.nested("expression", Self::parse_expr_inner)
+    }
+
+    fn parse_expr_inner(&mut self) -> PResult<Expr> {
         let mut e = self.parse_primary()?;
         loop {
             match self.peek().kind {

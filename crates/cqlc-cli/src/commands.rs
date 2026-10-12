@@ -106,6 +106,20 @@ fn status(format: MessageFormat, msg: String) {
     }
 }
 
+/// Writes through a temporary file in the same directory and renames it, so an
+/// interrupted run never leaves a half-written module behind.
+fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+    let name = path
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    let tmp = path.with_file_name(format!(".{name}.cqlc-tmp"));
+    let result = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 fn io_failure(msg: String) -> ExitCode {
     eprintln!("error: {msg}");
     ExitCode::from(2)
@@ -187,7 +201,7 @@ pub fn generate(
     {
         return io_failure(format!("cannot create {}: {e}", dir.display()));
     }
-    if let Err(e) = std::fs::write(&config.out, text) {
+    if let Err(e) = write_atomic(&config.out, &text) {
         return io_failure(format!("cannot write {}: {e}", config.out.display()));
     }
     status(

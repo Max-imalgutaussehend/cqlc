@@ -50,4 +50,4 @@ done
 ## Conduct and licensing
 
 Be kind; see [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Contributions are licensed under
-MIT OR Apache-2.0, like the project.
+Apache-2.0, like the project (see the license section of the README).

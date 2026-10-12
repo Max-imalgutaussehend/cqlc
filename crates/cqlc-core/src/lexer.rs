@@ -101,7 +101,12 @@ pub fn lex(file: FileId, src: &str) -> (Lexed, Vec<Diagnostic>) {
     let b = src.as_bytes();
     let mut out = Lexed::default();
     let mut diags = Vec::new();
-    let mut i = 0;
+    // Windows editors often prepend a UTF-8 byte order mark; it is not part of the CQL.
+    let mut i = if src.starts_with('\u{feff}') {
+        '\u{feff}'.len_utf8()
+    } else {
+        0
+    };
     let span = |s: usize, e: usize| Span::new(file, s, e);
 
     while i < b.len() {

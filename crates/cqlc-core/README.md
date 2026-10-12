@@ -22,4 +22,4 @@ Most users want the `cqlc` command line tool instead. See the
 policy: `compile` and the `ir`, `schema`, `types`, `diagnostic` and `span` modules are covered by
 semver; the compiler internals are not.
 
-Licensed under MIT or Apache-2.0, at your option.
+Licensed under the [Apache License, Version 2.0](LICENSE).

@@ -341,3 +341,57 @@ fn output_header_has_a_format_version_instead_of_the_crate_version() {
         &out[..80]
     );
 }
+
+/// Query text, names and column names end up in `///` comments of the generated
+/// file. A line break there would turn the rest of the text into code.
+#[test]
+fn text_from_the_cql_files_cannot_escape_doc_comments() {
+    let schema = "CREATE TABLE t (k int PRIMARY KEY, v text, \"we\nird\" text);";
+    let query = "-- name: Q :exec\nINSERT INTO t (k, v, \"we\nird\") VALUES (?, 'line1\nline2 fn evil() {}\r\npub fn also_evil() {}', ?);";
+    let out = one(schema, query, &Options::default()).unwrap();
+    // Every line inside the CQL doc block is a comment.
+    let mut inside = false;
+    for line in out.lines() {
+        if line.trim() == "/// ```text" {
+            inside = true;
+            continue;
+        }
+        if line.trim() == "/// ```" {
+            inside = false;
+        }
+        if inside {
+            assert!(
+                line.trim_start().starts_with("///"),
+                "not a comment: {line:?}"
+            );
+        }
+    }
+    assert!(!out.lines().any(|l| l.trim_start().starts_with("line2")));
+    assert!(!out.lines().any(|l| l.contains("fn evil")
+        && !l.trim_start().starts_with("//")
+        && !l.contains("pub const")));
+    // The multi-line column name is documented on one line, too.
+    for line in out.lines().filter(|l| l.contains("we\\nird")) {
+        assert!(
+            line.trim_start().starts_with("///")
+                || line.contains("rename")
+                || line.contains("pub const"),
+            "{line:?}"
+        );
+    }
+}
+
+#[test]
+fn bidirectional_and_control_characters_are_escaped() {
+    let schema = "CREATE TABLE t (k int PRIMARY KEY, v text);";
+    let query = "-- name: Q :exec\nINSERT INTO t (k, v) VALUES (?, 'a\u{202e}b\u{2066}c\u{0}d');";
+    let out = one(schema, query, &Options::default()).unwrap();
+    for bad in ['\u{202e}', '\u{2066}', '\u{0}'] {
+        assert!(
+            !out.contains(bad),
+            "U+{:04X} leaked into the output",
+            bad as u32
+        );
+    }
+    assert!(out.contains("\\u{202e}"));
+}

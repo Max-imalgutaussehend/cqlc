@@ -43,7 +43,7 @@ jobs:
         run: |
           dir="cqlc-${GITHUB_REF_NAME}-${{ matrix.name }}"
           mkdir "$dir"
-          cp LICENSE-MIT LICENSE-APACHE README.md CHANGELOG.md "$dir/"
+          cp LICENSE NOTICE README.md CHANGELOG.md "$dir/"
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             cp "target/${{ matrix.target }}/release/cqlc.exe" "$dir/"
             7z a "$dir.zip" "$dir"
@@ -71,6 +71,10 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::notice::CARGO_REGISTRY_TOKEN is not set; skipping crates.io. Publish locally with cargo publish -p cqlc-core, cqlc-codegen, cqlc."
+            exit 0
+          fi
           for crate in cqlc-core cqlc-codegen cqlc; do
             cargo publish -p "$crate"
             # let the index catch up before the next crate depends on it

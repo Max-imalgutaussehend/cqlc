@@ -13,4 +13,4 @@ cqlc generate    # writes src/queries.rs
 
 Documentation: <https://github.com/Max-imalgutaussehend/cqlc#readme>
 
-Licensed under MIT or Apache-2.0, at your option.
+Licensed under the [Apache License, Version 2.0](LICENSE).

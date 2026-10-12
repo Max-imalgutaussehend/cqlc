@@ -177,16 +177,32 @@ impl Diagnostic {
             Severity::Error => "error",
             Severity::Warning => "warning",
         };
+        // Very long lines (minified or generated input) show a window around the span.
+        const MAX_SHOWN: usize = 160;
+        const LEAD: usize = 40;
+        let chars: Vec<char> = line_text.chars().collect();
+        let (shown, caret_col, width) = if chars.len() > MAX_SHOWN {
+            let start = (col - 1).saturating_sub(LEAD);
+            let end = (start + MAX_SHOWN).min(chars.len());
+            let lead = if start > 0 { "…" } else { "" };
+            let trail = if end < chars.len() { "…" } else { "" };
+            let window: String = chars[start..end].iter().collect();
+            let caret = (col - 1 - start) + lead.chars().count();
+            let room = (end - (col - 1).min(end)).max(1);
+            (format!("{lead}{window}{trail}"), caret, width.min(room))
+        } else {
+            (line_text.to_string(), col - 1, width)
+        };
         let gutter = " ".repeat(line.to_string().len());
         let mut out = String::new();
         let _ = writeln!(out, "{sev}[{}]: {}", self.code.as_str(), self.message);
         let _ = writeln!(out, "{gutter}--> {}:{line}:{col}", file.name);
         let _ = writeln!(out, "{gutter} |");
-        let _ = writeln!(out, "{line} | {line_text}");
+        let _ = writeln!(out, "{line} | {shown}");
         let _ = writeln!(
             out,
             "{gutter} | {}{}",
-            " ".repeat(col - 1),
+            " ".repeat(caret_col),
             "^".repeat(width)
         );
         if let Some(help) = &self.help {
