@@ -137,10 +137,10 @@ pub fn generate(config_path: &Path, check_only: bool, deny_warnings: bool) -> Ex
         println!("{} is already up to date", config.out.display());
         return ExitCode::SUCCESS;
     }
-    if let Some(dir) = config.out.parent() {
-        if let Err(e) = std::fs::create_dir_all(dir) {
-            return io_failure(format!("cannot create {}: {e}", dir.display()));
-        }
+    if let Some(dir) = config.out.parent()
+        && let Err(e) = std::fs::create_dir_all(dir)
+    {
+        return io_failure(format!("cannot create {}: {e}", dir.display()));
     }
     if let Err(e) = std::fs::write(&config.out, text) {
         return io_failure(format!("cannot write {}: {e}", config.out.display()));

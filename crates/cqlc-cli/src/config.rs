@@ -69,13 +69,13 @@ impl Config {
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
         let raw: RawConfig =
             toml::from_str(&text).map_err(|e| format!("invalid {}: {e}", path.display()))?;
-        if let Some(v) = raw.version {
-            if v != 1 {
-                return Err(format!(
-                    "{}: unsupported config version {v} (this cqlc understands version 1)",
-                    path.display()
-                ));
-            }
+        if let Some(v) = raw.version
+            && v != 1
+        {
+            return Err(format!(
+                "{}: unsupported config version {v} (this cqlc understands version 1)",
+                path.display()
+            ));
         }
         let base = path.parent().unwrap_or(Path::new("."));
         let resolve = |v: Vec<String>| v.into_iter().map(|p| base.join(p)).collect();
