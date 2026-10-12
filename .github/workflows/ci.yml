@@ -63,9 +63,9 @@ jobs:
       matrix:
         include:
           - name: Cassandra 4.1
-            run: docker run -d --name db -p 9042:9042 -e MAX_HEAP_SIZE=512M -e HEAP_NEWSIZE=128M cassandra:4.1
+            run: docker run -d --name db -p 9042:9042 -e MAX_HEAP_SIZE=512M -e HEAP_NEWSIZE=128M -e CASSANDRA_BROADCAST_RPC_ADDRESS=127.0.0.1 cassandra:4.1
           - name: Cassandra 5.0
-            run: docker run -d --name db -p 9042:9042 -e MAX_HEAP_SIZE=512M -e HEAP_NEWSIZE=128M cassandra:5.0
+            run: docker run -d --name db -p 9042:9042 -e MAX_HEAP_SIZE=512M -e HEAP_NEWSIZE=128M -e CASSANDRA_BROADCAST_RPC_ADDRESS=127.0.0.1 cassandra:5.0
           - name: ScyllaDB
             run: docker run -d --name db -p 9042:9042 scylladb/scylla:latest --smp 1 --memory 750M --overprovisioned 1 --developer-mode 1
     steps:
