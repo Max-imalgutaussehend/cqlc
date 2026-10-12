@@ -40,7 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: Swatinem/rust-cache@v2
       # The published crates only: the examples depend on whatever the driver's dependencies need.
       - run: cargo check -p cqlc-core -p cqlc-codegen -p cqlc --all-targets
