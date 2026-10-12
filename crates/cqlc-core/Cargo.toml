@@ -1,0 +1,11 @@
+[package]
+name = "cqlc-core"
+description = "CQL lexer, parser, schema resolver, type checker and typed IR for cqlc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dev-dependencies]
+proptest = "1"

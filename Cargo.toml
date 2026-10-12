@@ -1,6 +1,11 @@
-[package]
-name = "cqlc"
+[workspace]
+resolver = "3"
+members = ["crates/*", "examples/basic", "tests/compile-types"]
+default-members = ["crates/*"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-
-[dependencies]
+license = "MIT"
+repository = "https://github.com/Max-imalgutaussehend/cqlc"
+rust-version = "1.85"

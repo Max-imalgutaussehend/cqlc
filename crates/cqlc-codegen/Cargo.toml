@@ -1,0 +1,11 @@
+[package]
+name = "cqlc-codegen"
+description = "Rust code generator for cqlc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cqlc-core = { path = "../cqlc-core" }

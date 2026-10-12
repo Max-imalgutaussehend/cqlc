@@ -1,0 +1,12 @@
+[package]
+name = "cqlc-compile-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Only compiled, never run: proves that generated code for every supported
+# CQL type is valid Rust against the pinned driver.
+[dependencies]
+scylla = "1.9"
+uuid = "1"

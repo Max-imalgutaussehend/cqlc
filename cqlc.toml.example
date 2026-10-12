@@ -1,0 +1,10 @@
+# Directories (or single files) containing *.cql files. A string or a list.
+schema = "schema"
+queries = "queries"
+
+[rust]
+# Where the generated module is written (relative to this file).
+out = "src/queries.rs"
+# "native": scylla's CqlTimestamp/CqlDate/CqlTime (no extra dependency)
+# "chrono": chrono types (enable scylla's `chrono-04` feature)
+time_library = "native"

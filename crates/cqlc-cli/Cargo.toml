@@ -1,0 +1,22 @@
+[package]
+name = "cqlc-cli"
+description = "Command line interface for cqlc, a static CQL analyzer and Rust code generator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "cqlc"
+path = "src/main.rs"
+
+[dependencies]
+cqlc-core = { path = "../cqlc-core" }
+cqlc-codegen = { path = "../cqlc-codegen" }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
