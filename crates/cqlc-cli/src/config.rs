@@ -23,6 +23,8 @@ impl OneOrMany {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
+    /// Config format version; only `1` exists.
+    version: Option<u32>,
     schema: OneOrMany,
     queries: OneOrMany,
     rust: RawRust,
@@ -34,6 +36,13 @@ struct RawRust {
     out: String,
     #[serde(default)]
     time_library: RawTimeLibrary,
+    /// Generate `stream_*` functions (needs the `futures` crate).
+    #[serde(default = "default_true")]
+    streams: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -51,6 +60,7 @@ pub struct Config {
     pub queries: Vec<PathBuf>,
     pub out: PathBuf,
     pub time_library: TimeLibrary,
+    pub streams: bool,
 }
 
 impl Config {
@@ -59,6 +69,14 @@ impl Config {
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
         let raw: RawConfig =
             toml::from_str(&text).map_err(|e| format!("invalid {}: {e}", path.display()))?;
+        if let Some(v) = raw.version {
+            if v != 1 {
+                return Err(format!(
+                    "{}: unsupported config version {v} (this cqlc understands version 1)",
+                    path.display()
+                ));
+            }
+        }
         let base = path.parent().unwrap_or(Path::new("."));
         let resolve = |v: Vec<String>| v.into_iter().map(|p| base.join(p)).collect();
         Ok(Config {
@@ -69,6 +87,7 @@ impl Config {
                 RawTimeLibrary::Native => TimeLibrary::Native,
                 RawTimeLibrary::Chrono => TimeLibrary::Chrono,
             },
+            streams: raw.rust.streams,
         })
     }
 }

@@ -36,6 +36,7 @@ fn example_matches_committed_output() {
     let dir = example_dir();
     let opts = Options {
         time_library: TimeLibrary::Chrono,
+        ..Options::default()
     };
     let out = generate(
         &inputs(&dir.join("schema")),
@@ -124,6 +125,7 @@ fn time_library_switches_types() {
         q,
         &Options {
             time_library: TimeLibrary::Chrono,
+            ..Options::default()
         },
     )
     .unwrap();

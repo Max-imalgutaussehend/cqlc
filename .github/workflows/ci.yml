@@ -23,8 +23,8 @@ jobs:
       # Generated code must compile against the pinned driver ...
       - run: cargo build -p cqlc-example-basic -p cqlc-compile-types
       # ... and the committed output must match the sources.
-      - run: cargo run -q -p cqlc-cli -- -c examples/basic/cqlc.toml generate --check
-      - run: cargo run -q -p cqlc-cli -- -c tests/compile-types/cqlc.toml generate --check
+      - run: cargo run -q -p cqlc -- -c examples/basic/cqlc.toml generate --check
+      - run: cargo run -q -p cqlc -- -c tests/compile-types/cqlc.toml generate --check
 
   integration:
     runs-on: ubuntu-latest

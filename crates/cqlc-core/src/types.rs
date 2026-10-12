@@ -67,6 +67,25 @@ impl CqlType {
         }
     }
 
+    pub fn is_numeric(&self) -> bool {
+        use CqlType::*;
+        matches!(
+            self.unfrozen(),
+            TinyInt | SmallInt | Int | BigInt | VarInt | Float | Double | Decimal | Counter
+        )
+    }
+
+    pub fn is_collection(&self) -> bool {
+        matches!(
+            self.unfrozen(),
+            CqlType::List(_) | CqlType::Set(_) | CqlType::Map(..)
+        )
+    }
+
+    pub fn is_frozen(&self) -> bool {
+        matches!(self, CqlType::Frozen(_))
+    }
+
     pub fn contains_udt(&self) -> bool {
         match self {
             CqlType::Udt(_) => true,

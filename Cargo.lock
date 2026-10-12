@@ -214,7 +214,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
-name = "cqlc-cli"
+name = "cqlc"
 version = "0.1.0"
 dependencies = [
  "clap",
@@ -236,6 +236,7 @@ dependencies = [
 name = "cqlc-compile-types"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "scylla",
  "uuid",
 ]
@@ -252,6 +253,7 @@ name = "cqlc-example-basic"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "futures",
  "scylla",
  "tokio",
  "uuid",

@@ -1,5 +1,5 @@
 [package]
-name = "cqlc-cli"
+name = "cqlc"
 description = "Command line interface for cqlc, a static CQL analyzer and Rust code generator"
 version.workspace = true
 edition.workspace = true

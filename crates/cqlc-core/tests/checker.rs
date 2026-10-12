@@ -239,13 +239,32 @@ fn writes_must_address_the_key() {
 }
 
 #[test]
-fn user_defined_types_are_rejected_only_where_used() {
-    let c = run("-- name: A :one\nSELECT note FROM with_udt WHERE id = ?;");
-    assert!(c.diagnostics.is_empty());
-    let c = run("-- name: B :one\nSELECT home FROM with_udt WHERE id = ?;");
-    assert_eq!(codes(&c), ["CQL110"]);
-    let c = run("-- name: C :one\nSELECT * FROM with_udt WHERE id = ?;");
-    assert_eq!(codes(&c), ["CQL110"]);
+fn user_defined_types_are_typed_and_exposed_in_the_ir() {
+    let c = run("-- name: A :one\nSELECT home, note FROM with_udt WHERE id = ?;");
+    assert!(c.diagnostics.is_empty(), "{:?}", c.diagnostics);
+    let q = &c.ir.queries[0];
+    assert_eq!(
+        q.columns[0].cql_type,
+        CqlType::Frozen(Box::new(CqlType::Udt("address".into())))
+    );
+    assert_eq!(c.ir.udts.len(), 1);
+    assert_eq!(c.ir.udts[0].name, "address");
+}
+
+#[test]
+fn udt_literals_and_fields() {
+    let c = run(
+        "-- name: A :exec\nINSERT INTO with_udt (id, home) VALUES (?, {street: 's', city: ?});\n\
+         -- name: B :one\nSELECT home.city AS city FROM with_udt WHERE id = ?;",
+    );
+    assert!(c.diagnostics.is_empty(), "{:?}", c.diagnostics);
+    assert_eq!(c.ir.queries[0].params[1].cql_type, CqlType::Text);
+    assert_eq!(c.ir.queries[1].columns[0].cql_type, CqlType::Text);
+    assert!(c.ir.queries[1].columns[0].nullable);
+    let c = run("-- name: C :exec\nINSERT INTO with_udt (id, home) VALUES (?, {nope: 'x'});");
+    assert_eq!(codes(&c), ["CQL102"]);
+    let c = run("-- name: D :one\nSELECT home.nope AS x FROM with_udt WHERE id = ?;");
+    assert_eq!(codes(&c), ["CQL102"]);
 }
 
 #[test]

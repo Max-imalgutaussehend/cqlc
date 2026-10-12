@@ -17,6 +17,7 @@ struct Parsed {
     statement: Statement,
     span: Span,
     cql: String,
+    marker_count: usize,
     /// Byte offset just after the previous statement terminator.
     lo: u32,
 }
@@ -75,6 +76,7 @@ pub fn parse_queries(file: FileId, src: &str) -> (Vec<QueryDef>, Vec<Diagnostic>
                     kind,
                     statement: p.statement,
                     cql: p.cql,
+                    marker_count: p.marker_count,
                     span: p.span,
                 });
             }
@@ -86,25 +88,31 @@ pub fn parse_queries(file: FileId, src: &str) -> (Vec<QueryDef>, Vec<Diagnostic>
 
 fn check_kind(kind: QueryKind, p: &Parsed) -> PResult<()> {
     let is_select = matches!(p.statement, Statement::Select(_));
-    let ok = match kind {
-        QueryKind::One | QueryKind::Many => is_select,
-        QueryKind::Exec => !is_select,
-    };
-    if ok {
-        return Ok(());
-    }
-    let (msg, help) = if is_select {
+    let conditional = p.statement.is_conditional();
+    let (ok, msg, help) = if is_select {
         (
+            matches!(kind, QueryKind::One | QueryKind::Many),
             "SELECT queries must be annotated `:one` or `:many`",
             "use `:one` for at most one row, `:many` for any number of rows",
         )
+    } else if conditional {
+        (
+            kind == QueryKind::Lwt,
+            "conditional writes (`IF ...`) must be annotated `:lwt`",
+            "the generated function returns whether the write was applied",
+        )
     } else {
         (
-            "INSERT, UPDATE and DELETE queries must be annotated `:exec`",
-            "change the annotation to `:exec`",
+            kind == QueryKind::Exec,
+            "INSERT, UPDATE and DELETE queries without `IF` must be annotated `:exec`",
+            "change the annotation to `:exec` (`:lwt` is only for statements with `IF`)",
         )
     };
-    Err(Diagnostic::error(DiagnosticCode::Annotation, p.span, msg).with_help(help))
+    if ok {
+        Ok(())
+    } else {
+        Err(Diagnostic::error(DiagnosticCode::Annotation, p.span, msg).with_help(help))
+    }
 }
 
 fn annotation(comments: &[Comment], p: &Parsed) -> PResult<(Ident, QueryKind)> {
@@ -117,14 +125,14 @@ fn annotation(comments: &[Comment], p: &Parsed) -> PResult<(Ident, QueryKind)> {
             p.span,
             "query has no `-- name:` annotation",
         )
-        .with_help("add `-- name: MyQuery :one|:many|:exec` on the line before the statement")
+        .with_help("add `-- name: MyQuery :one|:many|:exec|:lwt` on the line before the statement")
     };
     let c = candidate.ok_or_else(missing)?;
     let body = c.text.trim().trim_start_matches("name:").trim();
     let mut parts = body.split_whitespace();
     let bad = |msg: &str| {
         Diagnostic::error(DiagnosticCode::Annotation, c.span, msg)
-            .with_help("expected `-- name: MyQuery :one|:many|:exec`")
+            .with_help("expected `-- name: MyQuery :one|:many|:exec|:lwt`")
     };
     let name = parts
         .next()
@@ -144,12 +152,14 @@ fn annotation(comments: &[Comment], p: &Parsed) -> PResult<(Ident, QueryKind)> {
         ":one" => QueryKind::One,
         ":many" => QueryKind::Many,
         ":exec" => QueryKind::Exec,
+        ":lwt" => QueryKind::Lwt,
         other => return Err(bad(&format!("unknown result kind `{other}`"))),
     };
     Ok((
         Ident {
             name: name.to_string(),
             span: c.span,
+            quoted: false,
         },
         kind,
     ))
@@ -199,6 +209,7 @@ impl<'a> Parser<'a> {
                         statement,
                         span,
                         cql: self.normalized(start, end_tok),
+                        marker_count: self.markers,
                         lo,
                     });
                 }
@@ -327,13 +338,17 @@ impl<'a> Parser<'a> {
 
     fn ident(&mut self) -> PResult<Ident> {
         let t = self.peek().clone();
-        let name = match &t.kind {
-            TokenKind::Ident(s) => s.to_ascii_lowercase(),
-            TokenKind::QuotedIdent(s) => s.clone(),
+        let (name, quoted) = match &t.kind {
+            TokenKind::Ident(s) => (s.to_ascii_lowercase(), false),
+            TokenKind::QuotedIdent(s) => (s.clone(), true),
             _ => return Err(self.expected("an identifier")),
         };
         self.bump();
-        Ok(Ident { name, span: t.span })
+        Ok(Ident {
+            name,
+            span: t.span,
+            quoted,
+        })
     }
 
     fn table_name(&mut self) -> PResult<TableName> {
@@ -631,44 +646,25 @@ impl<'a> Parser<'a> {
 
     fn parse_select(&mut self) -> PResult<Select> {
         let start = self.expect_kw("SELECT")?;
-        for kw in ["JSON", "DISTINCT"] {
-            if self.at_kw(kw) {
-                let s = self.peek().span;
-                return Err(self.unsupported(s, &format!("`SELECT {kw}`")));
-            }
-        }
-        let selection = if self.at_star() {
+        let mode = if self.eat_kw("JSON") {
+            SelectMode::Json
+        } else if self.eat_kw("DISTINCT") {
+            SelectMode::Distinct
+        } else {
+            SelectMode::Normal
+        };
+        let selection = if self.peek().kind == TokenKind::Star {
             Selection::Star(self.bump().span)
         } else {
             let mut items = Vec::new();
             loop {
-                if self.peek().kind == TokenKind::Bind {
-                    return Err(Diagnostic::error(
-                        DiagnosticCode::UntypedBindMarker,
-                        self.peek().span,
-                        "bind marker in the selection list has no inferable type",
-                    )
-                    .with_help(
-                        "bind markers are only allowed in WHERE, VALUES, SET, LIMIT and USING",
-                    ));
-                }
-                let column = self.ident()?;
-                if matches!(self.peek().kind, TokenKind::LParen) {
-                    return Err(self.unsupported(
-                        column.span.to(self.peek().span),
-                        &format!("function call `{}(...)` in the selection list", column.name),
-                    ));
-                }
-                if matches!(self.peek().kind, TokenKind::Dot | TokenKind::LBracket) {
-                    let s = self.peek().span;
-                    return Err(self.unsupported(s, "field or element selection"));
-                }
+                let expr = self.parse_expr()?;
                 let alias = if self.eat_kw("AS") {
                     Some(self.ident()?)
                 } else {
                     None
                 };
-                items.push(SelectItem { column, alias });
+                items.push(SelectItem { expr, alias });
                 if !self.eat(&TokenKind::Comma) {
                     break;
                 }
@@ -682,10 +678,14 @@ impl<'a> Parser<'a> {
         } else {
             Vec::new()
         };
-        for kw in ["GROUP", "PER"] {
-            if self.at_kw(kw) {
-                let s = self.peek().span;
-                return Err(self.unsupported(s, &format!("`{kw}` clause")));
+        let mut group_by = Vec::new();
+        if self.eat_kw("GROUP") {
+            self.expect_kw("BY")?;
+            loop {
+                group_by.push(self.ident()?);
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
             }
         }
         let mut order_by = Vec::new();
@@ -700,8 +700,15 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+        let per_partition_limit = if self.eat_kw("PER") {
+            self.expect_kw("PARTITION")?;
+            self.expect_kw("LIMIT")?;
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
         let limit = if self.eat_kw("LIMIT") {
-            Some(self.parse_term()?)
+            Some(self.parse_expr()?)
         } else {
             None
         };
@@ -712,18 +719,17 @@ impl<'a> Parser<'a> {
         }
         let end = self.tokens[self.pos - 1].span;
         Ok(Select {
+            mode,
             selection,
             table,
             where_clause,
+            group_by,
             order_by,
+            per_partition_limit,
             limit,
             allow_filtering,
             span: start.to(end),
         })
-    }
-
-    fn at_star(&self) -> bool {
-        self.peek().kind == TokenKind::Star
     }
 
     fn parse_relations(&mut self) -> PResult<Vec<Relation>> {
@@ -737,131 +743,307 @@ impl<'a> Parser<'a> {
         Ok(rels)
     }
 
+    fn parse_ident_list_in_parens(&mut self) -> PResult<Vec<Ident>> {
+        self.expect(&TokenKind::LParen)?;
+        let mut ids = vec![self.ident()?];
+        while self.eat(&TokenKind::Comma) {
+            ids.push(self.ident()?);
+        }
+        self.expect(&TokenKind::RParen)?;
+        Ok(ids)
+    }
+
     fn parse_relation(&mut self) -> PResult<Relation> {
-        if self.peek().kind == TokenKind::LParen {
-            let s = self.peek().span;
-            return Err(self.unsupported(s, "tuple relations"));
-        }
-        let column = self.ident()?;
-        if matches!(self.peek().kind, TokenKind::LParen) {
-            return Err(self.unsupported(
-                column.span,
-                &format!("function call `{}(...)` in a relation", column.name),
-            ));
-        }
+        let start = self.peek().span;
+        let lhs = if self.peek().kind == TokenKind::LParen {
+            RelLhs::Tuple(self.parse_ident_list_in_parens()?)
+        } else if self.at_kw("TOKEN") && *self.peek_n(1) == TokenKind::LParen {
+            self.bump();
+            RelLhs::Token(self.parse_ident_list_in_parens()?)
+        } else {
+            let column = self.ident()?;
+            match self.peek().kind {
+                TokenKind::LParen => {
+                    return Err(self.unsupported(
+                        column.span,
+                        &format!(
+                            "function call `{}(...)` on the left side of a relation",
+                            column.name
+                        ),
+                    ));
+                }
+                TokenKind::LBracket => {
+                    self.bump();
+                    let key = self.parse_expr()?;
+                    self.expect(&TokenKind::RBracket)?;
+                    RelLhs::Element(column, key)
+                }
+                TokenKind::Dot => {
+                    self.bump();
+                    RelLhs::Field(column, self.ident()?)
+                }
+                _ => RelLhs::Column(column),
+            }
+        };
         let op_tok = self.peek().clone();
         let op = match &op_tok.kind {
             TokenKind::Eq => RelOp::Eq,
+            TokenKind::Ne => RelOp::Ne,
             TokenKind::Lt => RelOp::Lt,
             TokenKind::Le => RelOp::Le,
             TokenKind::Gt => RelOp::Gt,
             TokenKind::Ge => RelOp::Ge,
-            TokenKind::Ne => return Err(self.unsupported(op_tok.span, "operator `!=`")),
             TokenKind::Ident(s) if s.eq_ignore_ascii_case("IN") => RelOp::In,
-            TokenKind::Ident(s)
-                if s.eq_ignore_ascii_case("CONTAINS") || s.eq_ignore_ascii_case("LIKE") =>
-            {
-                return Err(self.unsupported(
-                    op_tok.span,
-                    &format!("operator `{}`", s.to_ascii_uppercase()),
-                ));
+            TokenKind::Ident(s) if s.eq_ignore_ascii_case("CONTAINS") => {
+                if matches!(self.peek_n(1), TokenKind::Ident(k) if k.eq_ignore_ascii_case("KEY")) {
+                    self.bump();
+                    RelOp::ContainsKey
+                } else {
+                    RelOp::Contains
+                }
             }
-            TokenKind::LBracket => {
-                return Err(self.unsupported(op_tok.span, "element access in a relation"));
+            TokenKind::Ident(s) if s.eq_ignore_ascii_case("LIKE") => {
+                return Err(self.unsupported(op_tok.span, "operator `LIKE`"));
             }
             _ => return Err(self.expected("a comparison operator")),
         };
         self.bump();
         let rhs = if op == RelOp::In && self.peek().kind == TokenKind::LParen {
             self.bump();
-            let mut terms = Vec::new();
+            let mut items = Vec::new();
             if self.peek().kind != TokenKind::RParen {
                 loop {
-                    terms.push(self.parse_term()?);
+                    items.push(self.parse_expr()?);
                     if !self.eat(&TokenKind::Comma) {
                         break;
                     }
                 }
             }
             self.expect(&TokenKind::RParen)?;
-            Rhs::List(terms)
+            Rhs::InList(items)
         } else {
-            Rhs::Term(self.parse_term()?)
+            Rhs::Expr(self.parse_expr()?)
         };
         let end = self.tokens[self.pos - 1].span;
         Ok(Relation {
-            span: column.span.to(end),
-            column,
+            lhs,
             op,
             rhs,
+            span: start.to(end),
         })
     }
 
-    fn parse_term(&mut self) -> PResult<Term> {
+    // ----- expressions ---------------------------------------------------
+
+    fn parse_expr(&mut self) -> PResult<Expr> {
+        let mut e = self.parse_primary()?;
+        loop {
+            match self.peek().kind {
+                TokenKind::Dot => {
+                    self.bump();
+                    let f = self.ident()?;
+                    let span = e.span.to(f.span);
+                    e = Expr {
+                        kind: ExprKind::Field(Box::new(e), f),
+                        span,
+                    };
+                }
+                TokenKind::LBracket => {
+                    self.bump();
+                    let idx = self.parse_expr()?;
+                    let end = self.expect(&TokenKind::RBracket)?;
+                    let span = e.span.to(end);
+                    e = Expr {
+                        kind: ExprKind::Index(Box::new(e), Box::new(idx)),
+                        span,
+                    };
+                }
+                _ => return Ok(e),
+            }
+        }
+    }
+
+    fn parse_primary(&mut self) -> PResult<Expr> {
         let t = self.peek().clone();
-        let kind = match &t.kind {
+        let lit = |p: &mut Self, l: Literal| {
+            p.bump();
+            Ok(Expr {
+                kind: ExprKind::Literal(l),
+                span: t.span,
+            })
+        };
+        match &t.kind {
             TokenKind::Bind => {
                 let i = self.markers;
                 self.markers += 1;
                 self.bump();
-                TermKind::Marker(i)
+                Ok(Expr {
+                    kind: ExprKind::Marker(i),
+                    span: t.span,
+                })
             }
-            TokenKind::String(s) => {
-                self.bump();
-                TermKind::Literal(Literal::String(s.clone()))
-            }
-            TokenKind::Number(n) => {
-                self.bump();
-                TermKind::Literal(number_literal(n, false))
-            }
+            TokenKind::String(s) => lit(self, Literal::String(s.clone())),
+            TokenKind::Number(n) => lit(self, number_literal(n, false)),
+            TokenKind::Uuid(u) => lit(self, Literal::Uuid(u.clone())),
+            TokenKind::Blob(b) => lit(self, Literal::Blob(b.clone())),
             TokenKind::Minus if matches!(self.peek_n(1), TokenKind::Number(_)) => {
                 self.bump();
-                let TokenKind::Number(n) = self.bump().kind else {
+                let n = self.bump();
+                let TokenKind::Number(n_text) = n.kind else {
                     unreachable!()
                 };
-                TermKind::Literal(number_literal(&n, true))
+                Ok(Expr {
+                    kind: ExprKind::Literal(number_literal(&n_text, true)),
+                    span: t.span.to(n.span),
+                })
             }
-            TokenKind::Uuid(u) => {
+            TokenKind::Colon => Err(self.unsupported(t.span, "named bind markers (use `?`)")),
+            TokenKind::LBracket => {
                 self.bump();
-                TermKind::Literal(Literal::Uuid(u.clone()))
+                let items = self.parse_expr_list(&TokenKind::RBracket)?;
+                let end = self.expect(&TokenKind::RBracket)?;
+                Ok(Expr {
+                    kind: ExprKind::List(items),
+                    span: t.span.to(end),
+                })
             }
-            TokenKind::Blob(b) => {
+            TokenKind::LParen => {
                 self.bump();
-                TermKind::Literal(Literal::Blob(b.clone()))
+                let mut items = vec![self.parse_expr()?];
+                let mut tuple = false;
+                while self.eat(&TokenKind::Comma) {
+                    tuple = true;
+                    items.push(self.parse_expr()?);
+                }
+                let end = self.expect(&TokenKind::RParen)?;
+                if tuple {
+                    Ok(Expr {
+                        kind: ExprKind::Tuple(items),
+                        span: t.span.to(end),
+                    })
+                } else {
+                    Ok(items.remove(0))
+                }
             }
-            TokenKind::Ident(s) if s.eq_ignore_ascii_case("true") => {
-                self.bump();
-                TermKind::Literal(Literal::Bool(true))
+            TokenKind::LBrace => self.parse_braces(),
+            TokenKind::Ident(word) if word.eq_ignore_ascii_case("true") => {
+                lit(self, Literal::Bool(true))
             }
-            TokenKind::Ident(s) if s.eq_ignore_ascii_case("false") => {
-                self.bump();
-                TermKind::Literal(Literal::Bool(false))
+            TokenKind::Ident(word) if word.eq_ignore_ascii_case("false") => {
+                lit(self, Literal::Bool(false))
             }
-            TokenKind::Ident(s) if s.eq_ignore_ascii_case("null") => {
-                self.bump();
-                TermKind::Literal(Literal::Null)
+            TokenKind::Ident(word) if word.eq_ignore_ascii_case("null") => lit(self, Literal::Null),
+            TokenKind::Ident(_) | TokenKind::QuotedIdent(_) => {
+                let name = self.ident()?;
+                if self.peek().kind == TokenKind::LParen {
+                    self.parse_call(name)
+                } else {
+                    Ok(Expr {
+                        span: name.span,
+                        kind: ExprKind::Column(name),
+                    })
+                }
             }
-            TokenKind::Colon => {
-                return Err(self.unsupported(t.span, "named bind markers (use `?`)"));
+            _ => Err(self.expected("an expression")),
+        }
+    }
+
+    fn parse_expr_list(&mut self, close: &TokenKind) -> PResult<Vec<Expr>> {
+        let mut items = Vec::new();
+        if &self.peek().kind != close {
+            loop {
+                items.push(self.parse_expr()?);
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
             }
-            TokenKind::Ident(_)
-            | TokenKind::QuotedIdent(_)
-            | TokenKind::LParen
-            | TokenKind::LBrace
-            | TokenKind::LBracket => {
-                return Err(self.unsupported(
-                    t.span,
-                    "this expression (only `?` and plain literals are supported)",
-                ));
-            }
-            _ => return Err(self.expected("a value or `?`")),
+        }
+        Ok(items)
+    }
+
+    fn parse_call(&mut self, name: Ident) -> PResult<Expr> {
+        self.expect(&TokenKind::LParen)?;
+        if name.name == "cast" {
+            let inner = self.parse_expr()?;
+            self.expect_kw("AS")?;
+            let ty = self.parse_type()?;
+            let end = self.expect(&TokenKind::RParen)?;
+            return Ok(Expr {
+                span: name.span.to(end),
+                kind: ExprKind::Cast(Box::new(inner), ty),
+            });
+        }
+        let mut star = false;
+        let args = if self.peek().kind == TokenKind::Star {
+            self.bump();
+            star = true;
+            Vec::new()
+        } else {
+            self.parse_expr_list(&TokenKind::RParen)?
         };
-        let end = self.tokens[self.pos - 1].span;
-        Ok(Term {
-            kind,
-            span: t.span.to(end),
+        let end = self.expect(&TokenKind::RParen)?;
+        Ok(Expr {
+            span: name.span.to(end),
+            kind: ExprKind::Call { name, args, star },
         })
     }
+
+    /// `{}`, `{a, b}`, `{k: v}` or `{field: v}`.
+    fn parse_braces(&mut self) -> PResult<Expr> {
+        let open = self.expect(&TokenKind::LBrace)?;
+        if self.peek().kind == TokenKind::RBrace {
+            let end = self.bump().span;
+            return Ok(Expr {
+                kind: ExprKind::EmptyBraces,
+                span: open.to(end),
+            });
+        }
+        let udt = matches!(
+            self.peek().kind,
+            TokenKind::Ident(_) | TokenKind::QuotedIdent(_)
+        ) && *self.peek_n(1) == TokenKind::Colon;
+        if udt {
+            let mut fields = Vec::new();
+            loop {
+                let f = self.ident()?;
+                self.expect(&TokenKind::Colon)?;
+                fields.push((f, self.parse_expr()?));
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            let end = self.expect(&TokenKind::RBrace)?;
+            return Ok(Expr {
+                kind: ExprKind::Udt(fields),
+                span: open.to(end),
+            });
+        }
+        let first = self.parse_expr()?;
+        if self.eat(&TokenKind::Colon) {
+            let mut pairs = vec![(first, self.parse_expr()?)];
+            while self.eat(&TokenKind::Comma) {
+                let k = self.parse_expr()?;
+                self.expect(&TokenKind::Colon)?;
+                pairs.push((k, self.parse_expr()?));
+            }
+            let end = self.expect(&TokenKind::RBrace)?;
+            return Ok(Expr {
+                kind: ExprKind::Map(pairs),
+                span: open.to(end),
+            });
+        }
+        let mut items = vec![first];
+        while self.eat(&TokenKind::Comma) {
+            items.push(self.parse_expr()?);
+        }
+        let end = self.expect(&TokenKind::RBrace)?;
+        Ok(Expr {
+            kind: ExprKind::Set(items),
+            span: open.to(end),
+        })
+    }
+
+    // ----- writes --------------------------------------------------------
 
     fn parse_using(&mut self) -> PResult<Using> {
         let mut using = Using::default();
@@ -870,9 +1052,9 @@ impl<'a> Parser<'a> {
         }
         loop {
             if self.eat_kw("TTL") {
-                using.ttl = Some(self.parse_term()?);
+                using.ttl = Some(self.parse_expr()?);
             } else if self.eat_kw("TIMESTAMP") {
-                using.timestamp = Some(self.parse_term()?);
+                using.timestamp = Some(self.parse_expr()?);
             } else {
                 return Err(self.expected("`TTL` or `TIMESTAMP`"));
             }
@@ -883,59 +1065,77 @@ impl<'a> Parser<'a> {
         Ok(using)
     }
 
-    fn reject_conditions(&mut self) -> PResult<()> {
-        if self.at_kw("IF") {
-            let s = self.peek().span;
-            return Err(self.unsupported(s, "lightweight transactions (`IF ...`)"));
+    fn parse_if(&mut self) -> PResult<Option<IfClause>> {
+        if !self.eat_kw("IF") {
+            return Ok(None);
         }
-        Ok(())
+        if self.eat_kw("EXISTS") {
+            return Ok(Some(IfClause::Exists));
+        }
+        if self.at_kw("NOT") {
+            let s = self.peek().span;
+            return Err(
+                self.unsupported(s, "`IF NOT EXISTS` on UPDATE/DELETE (only INSERT has it)")
+            );
+        }
+        Ok(Some(IfClause::Conditions(self.parse_relations()?)))
+    }
+
+    fn parse_target(&mut self) -> PResult<Target> {
+        let column = self.ident()?;
+        let mut key = None;
+        let mut field = None;
+        if self.eat(&TokenKind::LBracket) {
+            key = Some(self.parse_expr()?);
+            self.expect(&TokenKind::RBracket)?;
+        } else if self.eat(&TokenKind::Dot) {
+            field = Some(self.ident()?);
+        }
+        Ok(Target { column, key, field })
     }
 
     fn parse_insert(&mut self) -> PResult<Insert> {
         let start = self.expect_kw("INSERT")?;
         self.expect_kw("INTO")?;
         let table = self.table_name()?;
-        if self.at_kw("JSON") {
-            let s = self.peek().span;
-            return Err(self.unsupported(s, "`INSERT ... JSON`"));
-        }
-        self.expect(&TokenKind::LParen)?;
-        let mut columns = Vec::new();
-        loop {
-            columns.push(self.ident()?);
-            if !self.eat(&TokenKind::Comma) {
-                break;
+        let source = if self.eat_kw("JSON") {
+            let value = self.parse_expr()?;
+            if self.at_kw("DEFAULT") {
+                let s = self.peek().span;
+                return Err(self.unsupported(s, "`DEFAULT NULL|UNSET` on `INSERT ... JSON`"));
             }
-        }
-        self.expect(&TokenKind::RParen)?;
-        self.expect_kw("VALUES")?;
-        self.expect(&TokenKind::LParen)?;
-        let mut values = Vec::new();
-        loop {
-            values.push(self.parse_term()?);
-            if !self.eat(&TokenKind::Comma) {
-                break;
+            InsertSource::Json(value)
+        } else {
+            self.expect(&TokenKind::LParen)?;
+            let mut columns = Vec::new();
+            loop {
+                columns.push(self.ident()?);
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
             }
+            self.expect(&TokenKind::RParen)?;
+            self.expect_kw("VALUES")?;
+            self.expect(&TokenKind::LParen)?;
+            let values = self.parse_expr_list(&TokenKind::RParen)?;
+            self.expect(&TokenKind::RParen)?;
+            InsertSource::Values { columns, values }
+        };
+        let mut if_not_exists = false;
+        if self.eat_kw("IF") {
+            self.expect_kw("NOT")?;
+            self.expect_kw("EXISTS")?;
+            if_not_exists = true;
         }
-        self.expect(&TokenKind::RParen)?;
-        self.reject_conditions_or_if_not_exists()?;
         let using = self.parse_using()?;
         let end = self.tokens[self.pos - 1].span;
         Ok(Insert {
             table,
-            columns,
-            values,
+            source,
+            if_not_exists,
             using,
             span: start.to(end),
         })
-    }
-
-    fn reject_conditions_or_if_not_exists(&mut self) -> PResult<()> {
-        if self.at_kw("IF") {
-            let s = self.peek().span;
-            return Err(self.unsupported(s, "lightweight transactions (`IF NOT EXISTS`)"));
-        }
-        Ok(())
     }
 
     fn parse_update(&mut self) -> PResult<Update> {
@@ -945,48 +1145,86 @@ impl<'a> Parser<'a> {
         self.expect_kw("SET")?;
         let mut assignments = Vec::new();
         loop {
-            let column = self.ident()?;
-            match self.peek().kind {
-                TokenKind::LBracket | TokenKind::Dot => {
-                    let s = self.peek().span;
-                    return Err(self.unsupported(s, "element or field assignment"));
-                }
-                TokenKind::Plus | TokenKind::Minus => {
-                    let s = self.peek().span;
-                    return Err(self.unsupported(s, "collection and counter updates (`+=`, `-=`)"));
-                }
-                _ => {}
-            }
-            self.expect(&TokenKind::Eq)?;
-            let value = self.parse_term()?;
-            assignments.push(Assignment { column, value });
+            assignments.push(self.parse_assignment()?);
             if !self.eat(&TokenKind::Comma) {
                 break;
             }
         }
         self.expect_kw("WHERE")?;
         let where_clause = self.parse_relations()?;
-        self.reject_conditions()?;
+        let if_clause = self.parse_if()?;
         let end = self.tokens[self.pos - 1].span;
         Ok(Update {
             table,
             using,
             assignments,
             where_clause,
+            if_clause,
             span: start.to(end),
         })
     }
 
+    fn parse_assignment(&mut self) -> PResult<Assignment> {
+        let target = self.parse_target()?;
+        // `col += v` / `col -= v`
+        let compound = match self.peek().kind {
+            TokenKind::Plus if *self.peek_n(1) == TokenKind::Eq => Some(AssignOp::Add),
+            TokenKind::Minus if *self.peek_n(1) == TokenKind::Eq => Some(AssignOp::Sub),
+            _ => None,
+        };
+        if let Some(op) = compound {
+            self.bump();
+            self.bump();
+            let value = self.parse_expr()?;
+            return Ok(Assignment { target, op, value });
+        }
+        self.expect(&TokenKind::Eq)?;
+        let first = self.parse_expr()?;
+        let arith = match self.peek().kind {
+            TokenKind::Plus => Some(AssignOp::Add),
+            TokenKind::Minus => Some(AssignOp::Sub),
+            _ => None,
+        };
+        let Some(op) = arith else {
+            return Ok(Assignment {
+                target,
+                op: AssignOp::Set,
+                value: first,
+            });
+        };
+        let op_span = self.bump().span;
+        let second = self.parse_expr()?;
+        let is_target = |e: &Expr| {
+            matches!(&e.kind, ExprKind::Column(c) if c.name == target.column.name)
+                && target.key.is_none()
+                && target.field.is_none()
+        };
+        if is_target(&first) {
+            Ok(Assignment {
+                target,
+                op,
+                value: second,
+            })
+        } else if op == AssignOp::Add && is_target(&second) {
+            Ok(Assignment {
+                target,
+                op: AssignOp::Prepend,
+                value: first,
+            })
+        } else {
+            Err(self.unsupported(
+                op_span,
+                "arithmetic in assignments other than `col = col + v`, `col = col - v` and `col = v + col`",
+            ))
+        }
+    }
+
     fn parse_delete(&mut self) -> PResult<Delete> {
         let start = self.expect_kw("DELETE")?;
-        let mut columns = Vec::new();
+        let mut targets = Vec::new();
         if !self.at_kw("FROM") {
             loop {
-                columns.push(self.ident()?);
-                if matches!(self.peek().kind, TokenKind::LBracket | TokenKind::Dot) {
-                    let s = self.peek().span;
-                    return Err(self.unsupported(s, "element or field deletion"));
-                }
+                targets.push(self.parse_target()?);
                 if !self.eat(&TokenKind::Comma) {
                     break;
                 }
@@ -997,13 +1235,14 @@ impl<'a> Parser<'a> {
         let using = self.parse_using()?;
         self.expect_kw("WHERE")?;
         let where_clause = self.parse_relations()?;
-        self.reject_conditions()?;
+        let if_clause = self.parse_if()?;
         let end = self.tokens[self.pos - 1].span;
         Ok(Delete {
-            columns,
+            targets,
             table,
             using,
             where_clause,
+            if_clause,
             span: start.to(end),
         })
     }

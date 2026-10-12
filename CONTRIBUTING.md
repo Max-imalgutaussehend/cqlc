@@ -13,8 +13,8 @@ all of them agree.
 If generator output changes, regenerate the committed files and review the diff:
 
 ```bash
-cargo run -p cqlc-cli -- -c examples/basic/cqlc.toml generate
-cargo run -p cqlc-cli -- -c tests/compile-types/cqlc.toml generate
+cargo run -p cqlc -- -c examples/basic/cqlc.toml generate
+cargo run -p cqlc -- -c tests/compile-types/cqlc.toml generate
 ```
 
 CI also runs `examples/basic` against a real Cassandra node (`docker compose up -d --wait`

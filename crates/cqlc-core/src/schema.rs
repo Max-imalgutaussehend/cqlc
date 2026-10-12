@@ -53,6 +53,12 @@ impl Table {
         self.columns.iter().find(|c| c.name == name)
     }
 
+    pub fn is_counter_table(&self) -> bool {
+        self.columns
+            .iter()
+            .any(|c| matches!(c.cql_type, crate::types::CqlType::Counter))
+    }
+
     pub fn qualified_name(&self) -> String {
         match &self.keyspace {
             Some(ks) => format!("{ks}.{}", self.name),
@@ -73,6 +79,12 @@ pub struct Udt {
 pub struct Schema {
     pub tables: Vec<Table>,
     pub udts: Vec<Udt>,
+}
+
+impl Schema {
+    pub fn udt(&self, name: &str) -> Option<&Udt> {
+        self.udts.iter().find(|u| u.name == name)
+    }
 }
 
 pub enum Lookup<'a> {

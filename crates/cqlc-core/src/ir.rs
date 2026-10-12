@@ -1,6 +1,7 @@
 //! The typed intermediate representation consumed by code generators.
 
 use crate::ast::{QueryKind, RelOp};
+use crate::schema::Udt;
 use crate::span::Span;
 use crate::types::CqlType;
 
@@ -15,8 +16,13 @@ pub enum StatementKind {
 /// Where a bind parameter comes from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ParamSource {
-    /// Compared against a column in a `WHERE` clause.
+    /// Compared in a `WHERE` clause. `column` is `token` for token relations.
     Restriction {
+        column: String,
+        op: RelOp,
+    },
+    /// Compared in an `IF` condition.
+    Condition {
         column: String,
         op: RelOp,
     },
@@ -24,7 +30,20 @@ pub enum ParamSource {
     Assignment {
         column: String,
     },
+    /// Map key or list index of an element update or delete.
+    ElementKey {
+        column: String,
+    },
+    /// Value of an element update (`col[?] = value`).
+    ElementValue {
+        column: String,
+    },
+    /// `INSERT ... JSON ?`
+    Json,
+    /// Marker inside a selection expression.
+    Expression,
     Limit,
+    PerPartitionLimit,
     Ttl,
     Timestamp,
 }
@@ -32,7 +51,7 @@ pub enum ParamSource {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Param {
     /// Unique within the query; derived from the column (or `limit`, `ttl`,
-    /// `timestamp`).
+    /// `timestamp`, ...).
     pub name: String,
     pub cql_type: CqlType,
     /// Whether the caller may pass NULL for this value. This concerns bind
@@ -44,7 +63,7 @@ pub struct Param {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResultColumn {
-    /// Alias if given, otherwise the column name.
+    /// Alias if given, otherwise the column name. `[json]` for `SELECT JSON`.
     pub name: String,
     pub cql_type: CqlType,
     /// Whether the database cell may be absent.
@@ -62,7 +81,9 @@ pub struct Query {
     pub table: String,
     /// In bind-marker order.
     pub params: Vec<Param>,
-    /// Empty for non-SELECT statements.
+    /// Result columns of a `SELECT`. For [`QueryKind::Lwt`] these are the
+    /// columns the database reports back when the write was *not* applied;
+    /// all of them are nullable.
     pub columns: Vec<ResultColumn>,
     pub span: Span,
 }
@@ -70,4 +91,6 @@ pub struct Query {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Ir {
     pub queries: Vec<Query>,
+    /// All user-defined types of the schema.
+    pub udts: Vec<Udt>,
 }

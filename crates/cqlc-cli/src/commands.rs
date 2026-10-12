@@ -107,6 +107,7 @@ pub fn generate(config_path: &Path, check_only: bool, deny_warnings: bool) -> Ex
     if errors == 0 {
         let opts = Options {
             time_library: config.time_library,
+            streams: config.streams,
         };
         match generate_rust(&c.ir, &opts) {
             Ok(text) => code = Some(text),

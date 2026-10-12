@@ -9,6 +9,8 @@ use crate::types::CqlType;
 pub struct Ident {
     pub name: String,
     pub span: Span,
+    /// Written as `"quoted"` in the source.
+    pub quoted: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,6 +45,16 @@ impl Statement {
             self,
             Statement::CreateKeyspace(_) | Statement::CreateTable(_) | Statement::CreateType(_)
         )
+    }
+
+    /// `INSERT ... IF NOT EXISTS`, `UPDATE/DELETE ... IF ...`.
+    pub fn is_conditional(&self) -> bool {
+        match self {
+            Statement::Insert(i) => i.if_not_exists,
+            Statement::Update(u) => u.if_clause.is_some(),
+            Statement::Delete(d) => d.if_clause.is_some(),
+            _ => false,
+        }
     }
 }
 
@@ -103,26 +115,53 @@ pub enum Literal {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum TermKind {
-    /// Zero-based position among all bind markers of the statement.
-    Marker(usize),
-    Literal(Literal),
+pub struct Expr {
+    pub kind: ExprKind,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Term {
-    pub kind: TermKind,
-    pub span: Span,
+pub enum ExprKind {
+    /// Zero-based position among all bind markers of the statement.
+    Marker(usize),
+    Literal(Literal),
+    Column(Ident),
+    /// `expr.field` (UDT field).
+    Field(Box<Expr>, Ident),
+    /// `expr[index]` (map or list element).
+    Index(Box<Expr>, Box<Expr>),
+    /// `name(args)`; `star` is set for `count(*)`.
+    Call {
+        name: Ident,
+        args: Vec<Expr>,
+        star: bool,
+    },
+    Cast(Box<Expr>, CqlType),
+    /// `[a, b]`
+    List(Vec<Expr>),
+    /// `(a, b)`
+    Tuple(Vec<Expr>),
+    /// `{a, b}`
+    Set(Vec<Expr>),
+    /// `{k: v, ...}` with literal keys.
+    Map(Vec<(Expr, Expr)>),
+    /// `{field: v, ...}` with identifier keys.
+    Udt(Vec<(Ident, Expr)>),
+    /// `{}`: an empty set or map, decided by the expected type.
+    EmptyBraces,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RelOp {
     Eq,
+    Ne,
     Lt,
     Le,
     Gt,
     Ge,
     In,
+    Contains,
+    ContainsKey,
 }
 
 impl RelOp {
@@ -137,39 +176,63 @@ impl RelOp {
     pub fn suffix(self) -> &'static str {
         match self {
             RelOp::Eq => "eq",
+            RelOp::Ne => "ne",
             RelOp::Lt => "lt",
             RelOp::Le => "lte",
             RelOp::Gt => "gt",
             RelOp::Ge => "gte",
             RelOp::In => "in",
+            RelOp::Contains => "contains",
+            RelOp::ContainsKey => "contains_key",
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub enum RelLhs {
+    Column(Ident),
+    /// `token(a, b)`
+    Token(Vec<Ident>),
+    /// `(a, b)`
+    Tuple(Vec<Ident>),
+    /// `col[key]`
+    Element(Ident, Expr),
+    /// `col.field`
+    Field(Ident, Ident),
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Rhs {
-    Term(Term),
+    Expr(Expr),
     /// `IN (a, b, c)`
-    List(Vec<Term>),
+    InList(Vec<Expr>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Relation {
-    pub column: Ident,
+    pub lhs: RelLhs,
     pub op: RelOp,
     pub rhs: Rhs,
     pub span: Span,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum IfClause {
+    /// `IF EXISTS`
+    Exists,
+    /// `IF cond AND cond`
+    Conditions(Vec<Relation>),
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Using {
-    pub ttl: Option<Term>,
-    pub timestamp: Option<Term>,
+    pub ttl: Option<Expr>,
+    pub timestamp: Option<Expr>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SelectItem {
-    pub column: Ident,
+    pub expr: Expr,
     pub alias: Option<Ident>,
 }
 
@@ -179,30 +242,71 @@ pub enum Selection {
     Items(Vec<SelectItem>),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectMode {
+    Normal,
+    Json,
+    Distinct,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Select {
+    pub mode: SelectMode,
     pub selection: Selection,
     pub table: TableName,
     pub where_clause: Vec<Relation>,
+    pub group_by: Vec<Ident>,
     pub order_by: Vec<(Ident, Order)>,
-    pub limit: Option<Term>,
+    pub per_partition_limit: Option<Expr>,
+    pub limit: Option<Expr>,
     pub allow_filtering: bool,
     pub span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub enum InsertSource {
+    Values {
+        columns: Vec<Ident>,
+        values: Vec<Expr>,
+    },
+    /// `INSERT INTO t JSON <expr>`
+    Json(Expr),
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Insert {
     pub table: TableName,
-    pub columns: Vec<Ident>,
-    pub values: Vec<Term>,
+    pub source: InsertSource,
+    pub if_not_exists: bool,
     pub using: Using,
     pub span: Span,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AssignOp {
+    /// `col = value`
+    Set,
+    /// `col = col + value` / `col += value`
+    Add,
+    /// `col = col - value` / `col -= value`
+    Sub,
+    /// `col = value + col` (lists)
+    Prepend,
+}
+
+/// `col`, `col[key]` or `col.field`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Target {
+    pub column: Ident,
+    pub key: Option<Expr>,
+    pub field: Option<Ident>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Assignment {
-    pub column: Ident,
-    pub value: Term,
+    pub target: Target,
+    pub op: AssignOp,
+    pub value: Expr,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -211,15 +315,17 @@ pub struct Update {
     pub using: Using,
     pub assignments: Vec<Assignment>,
     pub where_clause: Vec<Relation>,
+    pub if_clause: Option<IfClause>,
     pub span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Delete {
-    pub columns: Vec<Ident>,
+    pub targets: Vec<Target>,
     pub table: TableName,
     pub using: Using,
     pub where_clause: Vec<Relation>,
+    pub if_clause: Option<IfClause>,
     pub span: Span,
 }
 
@@ -232,6 +338,8 @@ pub enum QueryKind {
     Many,
     /// No result rows.
     Exec,
+    /// Conditional write (lightweight transaction) with an `applied` result.
+    Lwt,
 }
 
 /// One annotated statement from a queries file.
@@ -242,5 +350,7 @@ pub struct QueryDef {
     pub statement: Statement,
     /// Whitespace-normalized CQL text without comments or trailing `;`.
     pub cql: String,
+    /// Number of `?` markers in the statement.
+    pub marker_count: usize,
     pub span: Span,
 }

@@ -6,9 +6,102 @@ use crate::schema::*;
 use crate::types::CqlType;
 use std::collections::HashSet;
 
+/// Keywords Cassandra reserves; they cannot be used as unquoted names.
+const RESERVED: &[&str] = &[
+    "add",
+    "allow",
+    "alter",
+    "and",
+    "apply",
+    "asc",
+    "authorize",
+    "batch",
+    "begin",
+    "by",
+    "columnfamily",
+    "create",
+    "delete",
+    "desc",
+    "describe",
+    "drop",
+    "entries",
+    "execute",
+    "from",
+    "full",
+    "grant",
+    "if",
+    "in",
+    "index",
+    "infinity",
+    "insert",
+    "into",
+    "keyspace",
+    "limit",
+    "modify",
+    "nan",
+    "norecursive",
+    "not",
+    "null",
+    "of",
+    "on",
+    "or",
+    "order",
+    "primary",
+    "rename",
+    "replace",
+    "revoke",
+    "schema",
+    "select",
+    "set",
+    "table",
+    "to",
+    "token",
+    "truncate",
+    "unlogged",
+    "update",
+    "use",
+    "using",
+    "view",
+    "where",
+    "with",
+];
+
+fn check_reserved(id: &crate::ast::Ident, diags: &mut Vec<Diagnostic>) {
+    if !id.quoted && RESERVED.contains(&id.name.as_str()) {
+        diags.push(
+            Diagnostic::error(
+                DiagnosticCode::ReservedWord,
+                id.span,
+                format!(
+                    "`{}` is a reserved CQL keyword and cannot be used as a name",
+                    id.name
+                ),
+            )
+            .with_help(format!("rename it or quote it as \"{}\"", id.name)),
+        );
+    }
+}
+
 pub fn build_schema(statements: &[Statement]) -> (Schema, Vec<Diagnostic>) {
     let mut schema = Schema::default();
     let mut diags = Vec::new();
+    for stmt in statements {
+        match stmt {
+            Statement::CreateTable(t) => {
+                check_reserved(&t.name.name, &mut diags);
+                t.columns
+                    .iter()
+                    .for_each(|c| check_reserved(&c.name, &mut diags));
+            }
+            Statement::CreateType(t) => {
+                check_reserved(&t.name.name, &mut diags);
+                t.fields
+                    .iter()
+                    .for_each(|(f, _)| check_reserved(f, &mut diags));
+            }
+            _ => {}
+        }
+    }
 
     // UDTs first so tables may reference them regardless of file order.
     for stmt in statements {

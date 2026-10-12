@@ -49,6 +49,14 @@ pub enum DiagnosticCode {
     NonKeyRestriction,
     /// Clustering restriction skips a column.
     ClusteringGap,
+    /// Unknown function.
+    UnknownFunction,
+    /// Expression in the selection list needs an `AS` alias.
+    MissingAlias,
+    /// `ORDER BY` may not match the clustering order.
+    OrderBy,
+    /// Reserved CQL keyword used as an unquoted identifier.
+    ReservedWord,
 }
 
 impl DiagnosticCode {
@@ -73,6 +81,10 @@ impl DiagnosticCode {
             AllowFiltering => "CQL202",
             NonKeyRestriction => "CQL203",
             ClusteringGap => "CQL204",
+            UnknownFunction => "CQL113",
+            MissingAlias => "CQL114",
+            OrderBy => "CQL205",
+            ReservedWord => "CQL115",
         }
     }
 }
