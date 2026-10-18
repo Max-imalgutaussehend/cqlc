@@ -4,6 +4,33 @@ All notable changes are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to
 [Semantic Versioning](https://semver.org); see [docs/STABILITY.md](docs/STABILITY.md).
 
+## [1.1.0] - 2026-10-18
+
+Support for the CQL of Apache Cassandra 4.0, 4.1 and 5.0 (checked against the ANTLR grammar and the
+native function classes of apache/cassandra) and the schema statements real projects contain.
+
+### Added
+
+* Types and DDL: `vector<T, N>` (generated as `Vec<T>`), `CREATE [CUSTOM] INDEX` (legacy, SAI, SASI, `KEYS`/`VALUES`/`ENTRIES`/`FULL`),
+  `CREATE MATERIALIZED VIEW` (queryable, read-only), `CREATE FUNCTION` / `CREATE AGGREGATE`, `ALTER TABLE` / `ALTER TYPE`,
+  `DROP ...`, `MASKED WITH ...` and `CHECK ...` column clauses, and `USE`, `TRUNCATE`, roles, grants and triggers, which are accepted and ignored.
+* Queries: `ORDER BY col ANN OF vector LIMIT n` with the Cassandra rules (SAI index, `LIMIT` <= 1000), `LIKE`, arithmetic
+  (`+ - * / %`, unary `-`, duration literals such as `1d` and `3h30m`) typed like `OperationFcts`, and the functions
+  `maxwritetime`, `abs`, `exp`, `log`, `log10`, `round`, `map_keys`, `map_values`, `collection_count/min/max/sum/avg`,
+  `similarity_cosine/euclidean/dot_product`, `mask_*`, `toJson`, `<type>AsBlob`, `blobAs<type>`, `dateOf`, `unixTimestampOf`
+  and user-defined functions and aggregates from the schema.
+* Indexes are used for the warnings: a restriction on a non-key column that an index serves no longer raises `CQL203`.
+* `examples/cassandra5`, run in CI against Cassandra 5.0: vector search, SAI, masking and the new functions through generated code.
+
+### Changed
+
+* `Table`, `Column` and `Schema` gained fields (`indexes`, `base_table`, `masked`, `functions`); the types are `#[non_exhaustive]`.
+* The lexer has `Slash` and `Percent` tokens; `RelOp` has `Like`; `CqlType` has `Vector`.
+
+### Not yet supported
+
+* `BEGIN BATCH` and Cassandra 6.0 `BEGIN TRANSACTION` (Accord); named bind markers.
+
 ## [1.0.1] - 2026-10-12
 
 ### Security

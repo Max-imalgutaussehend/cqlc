@@ -195,14 +195,12 @@ fn conditional_writes_need_the_lwt_annotation() {
 #[test]
 fn constructs_outside_the_subset_are_rejected_explicitly() {
     let cases = [
-        "SELECT a FROM t WHERE a LIKE ?",
         "SELECT a FROM t WHERE f(a) = ?",
         "SELECT a FROM t WHERE k = :named",
         "UPDATE t SET a = 1 + 2 WHERE k = ?",
         "UPDATE t SET a = b + ? WHERE k = ?",
         "UPDATE t SET a = ? WHERE k = ? IF NOT EXISTS",
         "INSERT INTO t JSON ? DEFAULT NULL",
-        "TRUNCATE t",
     ];
     for c in cases {
         let src = format!("-- name: X :one\n{c};");

@@ -1,10 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "examples/basic", "examples/shop", "tests/compile-types"]
+members = ["crates/*", "examples/basic", "examples/shop", "examples/cassandra5", "tests/compile-types"]
 default-members = ["crates/*"]
 
 [workspace.package]
-version = "1.0.1"
+version = "1.1.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/Max-imalgutaussehend/cqlc"
@@ -16,8 +16,8 @@ keywords = ["cassandra", "scylla", "cql", "codegen", "sqlc"]
 categories = ["database", "development-tools"]
 
 [workspace.dependencies]
-cqlc-core = { path = "crates/cqlc-core", version = "1.0.1" }
-cqlc-codegen = { path = "crates/cqlc-codegen", version = "1.0.1" }
+cqlc-core = { path = "crates/cqlc-core", version = "1.1.0" }
+cqlc-codegen = { path = "crates/cqlc-codegen", version = "1.1.0" }
 
 [profile.release]
 lto = "thin"

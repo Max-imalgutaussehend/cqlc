@@ -420,19 +420,29 @@ impl<'a> Parser<'a> {
             "INSERT" => self.parse_insert().map(Statement::Insert),
             "UPDATE" => self.parse_update().map(Statement::Update),
             "DELETE" => self.parse_delete().map(Statement::Delete),
+            "ALTER" => self.parse_alter(),
+            "DROP" => self.parse_drop(),
+            "USE" | "TRUNCATE" | "GRANT" | "REVOKE" | "LIST" | "COMMENT" => self.parse_ignored(),
+            "BEGIN" => Err(self.unsupported(t.span, "`BEGIN BATCH` / `BEGIN TRANSACTION`")),
             _ => Err(self.unsupported(t.span, &format!("statement `{word}`"))),
         }
     }
 
     fn parse_create(&mut self) -> PResult<Statement> {
         let start = self.expect_kw("CREATE")?;
-        if self.at_kw("TABLE") {
+        // `CREATE OR REPLACE FUNCTION|AGGREGATE`
+        if self.at_kw("OR") && self.kw_at(1, "REPLACE") {
+            self.bump();
+            self.bump();
+        }
+        self.eat_kw("CUSTOM");
+        if self.at_kw("TABLE") || self.at_kw("COLUMNFAMILY") {
             self.bump();
             self.parse_create_table(start).map(Statement::CreateTable)
         } else if self.at_kw("TYPE") {
             self.bump();
             self.parse_create_type(start).map(Statement::CreateType)
-        } else if self.at_kw("KEYSPACE") {
+        } else if self.at_kw("KEYSPACE") || self.at_kw("SCHEMA") {
             self.bump();
             self.eat_if_not_exists()?;
             let name = self.ident()?;
@@ -441,6 +451,23 @@ impl<'a> Parser<'a> {
                 self.bump();
             }
             Ok(Statement::CreateKeyspace(CreateKeyspace { name }))
+        } else if self.at_kw("INDEX") {
+            self.bump();
+            self.parse_create_index(start).map(Statement::CreateIndex)
+        } else if self.at_kw("MATERIALIZED") && self.kw_at(1, "VIEW") {
+            self.bump();
+            self.bump();
+            self.parse_create_view(start).map(Statement::CreateView)
+        } else if self.at_kw("FUNCTION") {
+            self.bump();
+            self.parse_create_function(start)
+                .map(Statement::CreateFunction)
+        } else if self.at_kw("AGGREGATE") {
+            self.bump();
+            self.parse_create_aggregate(start)
+                .map(Statement::CreateAggregate)
+        } else if self.at_kw("TRIGGER") || self.at_kw("ROLE") || self.at_kw("USER") {
+            self.parse_ignored_from(start)
         } else {
             let t = self.peek().clone();
             Err(self.unsupported(
@@ -483,7 +510,141 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        let end = self.expect(&TokenKind::RParen)?;
+        self.expect(&TokenKind::RParen)?;
+        let clustering_order = self.parse_with_options()?;
+        let end = self.tokens[self.pos - 1].span;
+        Ok(CreateTable {
+            name,
+            columns,
+            primary_key,
+            clustering_order,
+            span: start.to(end),
+        })
+    }
+
+    /// Consumes a statement that has no effect on typing.
+    fn parse_ignored(&mut self) -> PResult<Statement> {
+        let start = self.peek().span;
+        self.parse_ignored_from(start)
+    }
+
+    fn parse_ignored_from(&mut self, start: Span) -> PResult<Statement> {
+        while !matches!(self.peek().kind, TokenKind::Semi | TokenKind::Eof) {
+            self.bump();
+        }
+        let end = self.tokens[self.pos - 1].span;
+        let what: String = self.src[start.to(end).range()]
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_uppercase();
+        Ok(Statement::Ignored(Ignored {
+            what,
+            span: start.to(end),
+        }))
+    }
+
+    fn parse_create_index(&mut self, start: Span) -> PResult<CreateIndex> {
+        self.eat_if_not_exists()?;
+        let name = if self.at_kw("ON") {
+            None
+        } else {
+            Some(self.ident()?)
+        };
+        self.expect_kw("ON")?;
+        let table = self.table_name()?;
+        self.expect(&TokenKind::LParen)?;
+        let kind = if self.at_kw("KEYS") && matches!(self.peek_n(1), TokenKind::LParen) {
+            self.bump();
+            IndexKind::Keys
+        } else if self.at_kw("VALUES") && matches!(self.peek_n(1), TokenKind::LParen) {
+            self.bump();
+            IndexKind::Values
+        } else if self.at_kw("ENTRIES") && matches!(self.peek_n(1), TokenKind::LParen) {
+            self.bump();
+            IndexKind::Entries
+        } else if self.at_kw("FULL") && matches!(self.peek_n(1), TokenKind::LParen) {
+            self.bump();
+            IndexKind::Full
+        } else {
+            IndexKind::Values
+        };
+        let wrapped = self.peek().kind == TokenKind::LParen;
+        if wrapped {
+            self.bump();
+        }
+        let column = self.ident()?;
+        if wrapped {
+            self.expect(&TokenKind::RParen)?;
+        }
+        self.expect(&TokenKind::RParen)?;
+        let mut class = None;
+        if self.eat_kw("USING") {
+            match self.peek().kind.clone() {
+                TokenKind::String(c) => {
+                    self.bump();
+                    class = Some(c);
+                }
+                _ => return Err(self.expected("an index class string")),
+            }
+        }
+        // `WITH OPTIONS = {...}` does not influence typing.
+        while !matches!(self.peek().kind, TokenKind::Semi | TokenKind::Eof) {
+            self.bump();
+        }
+        let end = self.tokens[self.pos - 1].span;
+        Ok(CreateIndex {
+            name,
+            table,
+            column,
+            kind,
+            class,
+            span: start.to(end),
+        })
+    }
+
+    fn parse_create_view(&mut self, start: Span) -> PResult<CreateView> {
+        self.eat_if_not_exists()?;
+        let name = self.table_name()?;
+        self.expect_kw("AS")?;
+        self.expect_kw("SELECT")?;
+        let columns = if self.peek().kind == TokenKind::Star {
+            self.bump();
+            None
+        } else {
+            let mut cols = vec![self.ident()?];
+            while self.eat(&TokenKind::Comma) {
+                cols.push(self.ident()?);
+            }
+            Some(cols)
+        };
+        self.expect_kw("FROM")?;
+        let base = self.table_name()?;
+        // `WHERE col IS NOT NULL AND ...`: skipped up to the PRIMARY KEY clause.
+        while !(self.at_kw("PRIMARY") && self.kw_at(1, "KEY")) {
+            if matches!(self.peek().kind, TokenKind::Semi | TokenKind::Eof) {
+                return Err(self.expected("`PRIMARY KEY`"));
+            }
+            self.bump();
+        }
+        let pk_start = self.bump().span;
+        self.bump();
+        let primary_key = self.parse_primary_key(pk_start)?;
+        let clustering_order = self.parse_with_options()?;
+        let end = self.tokens[self.pos - 1].span;
+        Ok(CreateView {
+            name,
+            base,
+            columns,
+            primary_key,
+            clustering_order,
+            span: start.to(end),
+        })
+    }
+
+    /// `WITH CLUSTERING ORDER BY (...) AND other = options`; returns the clustering order.
+    fn parse_with_options(&mut self) -> PResult<Vec<(Ident, Order)>> {
         let mut clustering_order = Vec::new();
         if self.eat_kw("WITH") {
             loop {
@@ -509,13 +670,250 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        Ok(CreateTable {
+        Ok(clustering_order)
+    }
+
+    fn parse_create_function(&mut self, start: Span) -> PResult<CreateFunction> {
+        self.eat_if_not_exists()?;
+        let name = self.table_name()?;
+        self.expect(&TokenKind::LParen)?;
+        let mut args = Vec::new();
+        if self.peek().kind != TokenKind::RParen {
+            loop {
+                let _arg_name = self.ident()?;
+                args.push(self.parse_type()?);
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect(&TokenKind::RParen)?;
+        // skip `CALLED ON NULL INPUT` / `RETURNS NULL ON NULL INPUT`
+        while !self.at_kw("RETURNS") || self.kw_at(1, "NULL") {
+            if matches!(self.peek().kind, TokenKind::Semi | TokenKind::Eof) {
+                return Err(self.expected("`RETURNS <type>`"));
+            }
+            self.bump();
+        }
+        self.expect_kw("RETURNS")?;
+        let returns = self.parse_type()?;
+        // `LANGUAGE x AS '<body>'`: the body is one string token; skip the rest.
+        while !matches!(self.peek().kind, TokenKind::Semi | TokenKind::Eof) {
+            self.bump();
+        }
+        let end = self.tokens[self.pos - 1].span;
+        Ok(CreateFunction {
             name,
-            columns,
-            primary_key,
-            clustering_order,
+            args,
+            returns,
             span: start.to(end),
         })
+    }
+
+    fn parse_create_aggregate(&mut self, start: Span) -> PResult<CreateAggregate> {
+        self.eat_if_not_exists()?;
+        let name = self.table_name()?;
+        self.expect(&TokenKind::LParen)?;
+        let mut args = Vec::new();
+        if self.peek().kind != TokenKind::RParen {
+            loop {
+                args.push(self.parse_type()?);
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect(&TokenKind::RParen)?;
+        self.expect_kw("SFUNC")?;
+        let _sfunc = self.table_name()?;
+        self.expect_kw("STYPE")?;
+        let state_type = self.parse_type()?;
+        let mut final_func = None;
+        loop {
+            if self.eat_kw("FINALFUNC") {
+                final_func = Some(self.table_name()?.name);
+            } else if self.eat_kw("INITCOND") {
+                let mut depth = 0usize;
+                loop {
+                    match &self.peek().kind {
+                        TokenKind::Semi | TokenKind::Eof => break,
+                        TokenKind::LParen | TokenKind::LBrace | TokenKind::LBracket => depth += 1,
+                        TokenKind::RParen | TokenKind::RBrace | TokenKind::RBracket => {
+                            depth = depth.saturating_sub(1)
+                        }
+                        TokenKind::Ident(k)
+                            if depth == 0
+                                && (k.eq_ignore_ascii_case("FINALFUNC")
+                                    || k.eq_ignore_ascii_case("DETERMINISTIC")) =>
+                        {
+                            break;
+                        }
+                        _ => {}
+                    }
+                    self.bump();
+                }
+            } else if !self.eat_kw("DETERMINISTIC") {
+                break;
+            }
+        }
+        let end = self.tokens[self.pos - 1].span;
+        Ok(CreateAggregate {
+            name,
+            args,
+            state_type,
+            final_func,
+            span: start.to(end),
+        })
+    }
+
+    fn parse_alter(&mut self) -> PResult<Statement> {
+        let start = self.expect_kw("ALTER")?;
+        if self.at_kw("TABLE") || self.at_kw("COLUMNFAMILY") {
+            self.bump();
+            if self.eat_kw("IF") {
+                self.expect_kw("EXISTS")?;
+            }
+            let table = self.table_name()?;
+            let action = if self.eat_kw("ADD") {
+                if self.eat_kw("IF") {
+                    self.expect_kw("NOT")?;
+                    self.expect_kw("EXISTS")?;
+                }
+                let paren = self.eat(&TokenKind::LParen);
+                let mut cols = vec![self.parse_column_def()?];
+                while self.eat(&TokenKind::Comma) {
+                    cols.push(self.parse_column_def()?);
+                }
+                if paren {
+                    self.expect(&TokenKind::RParen)?;
+                }
+                AlterTableAction::Add(cols)
+            } else if self.at_kw("DROP") && !self.kw_at(1, "COMPACT") {
+                self.bump();
+                if self.eat_kw("IF") {
+                    self.expect_kw("EXISTS")?;
+                }
+                let paren = self.eat(&TokenKind::LParen);
+                let mut cols = vec![self.ident()?];
+                while self.eat(&TokenKind::Comma) {
+                    cols.push(self.ident()?);
+                }
+                if paren {
+                    self.expect(&TokenKind::RParen)?;
+                }
+                AlterTableAction::Drop(cols)
+            } else if self.eat_kw("RENAME") {
+                if self.eat_kw("IF") {
+                    self.expect_kw("EXISTS")?;
+                }
+                let mut pairs = Vec::new();
+                loop {
+                    let from = self.ident()?;
+                    self.expect_kw("TO")?;
+                    pairs.push((from, self.ident()?));
+                    if !self.eat_kw("AND") {
+                        break;
+                    }
+                }
+                AlterTableAction::Rename(pairs)
+            } else {
+                AlterTableAction::Other
+            };
+            // `WITH options` or the remainder of ALTER ... MASKED / DROP COMPACT STORAGE
+            while !matches!(self.peek().kind, TokenKind::Semi | TokenKind::Eof) {
+                self.bump();
+            }
+            let end = self.tokens[self.pos - 1].span;
+            Ok(Statement::AlterTable(AlterTable {
+                table,
+                action,
+                span: start.to(end),
+            }))
+        } else if self.at_kw("TYPE") {
+            self.bump();
+            if self.eat_kw("IF") {
+                self.expect_kw("EXISTS")?;
+            }
+            let name = self.table_name()?;
+            let action = if self.eat_kw("ADD") {
+                if self.eat_kw("IF") {
+                    self.expect_kw("NOT")?;
+                    self.expect_kw("EXISTS")?;
+                }
+                let field = self.ident()?;
+                AlterTypeAction::Add(field, self.parse_type()?)
+            } else if self.eat_kw("RENAME") {
+                let mut pairs = Vec::new();
+                loop {
+                    let from = self.ident()?;
+                    self.expect_kw("TO")?;
+                    pairs.push((from, self.ident()?));
+                    if !self.eat_kw("AND") {
+                        break;
+                    }
+                }
+                AlterTypeAction::Rename(pairs)
+            } else {
+                return Err(self.expected("`ADD` or `RENAME`"));
+            };
+            let end = self.tokens[self.pos - 1].span;
+            Ok(Statement::AlterType(AlterType {
+                name,
+                action,
+                span: start.to(end),
+            }))
+        } else {
+            // ALTER KEYSPACE / ROLE / USER / MATERIALIZED VIEW: no effect on typing.
+            self.parse_ignored_from(start)
+        }
+    }
+
+    fn parse_drop(&mut self) -> PResult<Statement> {
+        let start = self.expect_kw("DROP")?;
+        let kind = if self.at_kw("TABLE") || self.at_kw("COLUMNFAMILY") {
+            self.bump();
+            DropKind::Table
+        } else if self.at_kw("TYPE") {
+            self.bump();
+            DropKind::Type
+        } else if self.at_kw("INDEX") {
+            self.bump();
+            DropKind::Index
+        } else if self.at_kw("MATERIALIZED") && self.kw_at(1, "VIEW") {
+            self.bump();
+            self.bump();
+            DropKind::View
+        } else if self.at_kw("KEYSPACE") || self.at_kw("SCHEMA") {
+            self.bump();
+            DropKind::Keyspace
+        } else if self.at_kw("FUNCTION") {
+            self.bump();
+            DropKind::Function
+        } else if self.at_kw("AGGREGATE") {
+            self.bump();
+            DropKind::Aggregate
+        } else if self.at_kw("TRIGGER") || self.at_kw("ROLE") || self.at_kw("USER") {
+            return self.parse_ignored_from(start);
+        } else {
+            return Err(self.expected("what to drop"));
+        };
+        let mut if_exists = false;
+        if self.eat_kw("IF") {
+            self.expect_kw("EXISTS")?;
+            if_exists = true;
+        }
+        let name = self.table_name()?;
+        // an optional signature `(type, ...)` of functions and aggregates
+        while !matches!(self.peek().kind, TokenKind::Semi | TokenKind::Eof) {
+            self.bump();
+        }
+        let end = self.tokens[self.pos - 1].span;
+        Ok(Statement::Drop(Drop {
+            kind,
+            name,
+            if_exists,
+            span: start.to(end),
+        }))
     }
 
     /// Skips one `WITH` option (e.g. `comment = '...'`) up to `AND`/`;`.
@@ -585,6 +983,8 @@ impl<'a> Parser<'a> {
         let ty_span = ty_start.to(self.tokens[self.pos - 1].span);
         let mut is_static = false;
         let mut inline_primary_key = false;
+        let mut masked = false;
+        let mut has_check = false;
         loop {
             if self.at_kw("STATIC") {
                 self.bump();
@@ -593,6 +993,14 @@ impl<'a> Parser<'a> {
                 self.bump();
                 self.bump();
                 inline_primary_key = true;
+            } else if self.at_kw("MASKED") {
+                self.bump();
+                self.skip_column_clause();
+                masked = true;
+            } else if self.at_kw("CHECK") {
+                self.bump();
+                self.skip_column_clause();
+                has_check = true;
             } else {
                 break;
             }
@@ -603,6 +1011,8 @@ impl<'a> Parser<'a> {
             ty_span,
             is_static,
             inline_primary_key,
+            masked,
+            has_check,
         })
     }
 
@@ -640,6 +1050,35 @@ impl<'a> Parser<'a> {
                 let v = self.parse_type()?;
                 close(self)?;
                 CqlType::Map(Box::new(k), Box::new(v))
+            }
+            "vector" => {
+                generic(self)?;
+                let t = self.parse_type()?;
+                self.expect(&TokenKind::Comma)?;
+                let dim = self.bump();
+                let TokenKind::Number(n) = &dim.kind else {
+                    return Err(Diagnostic::error(
+                        DiagnosticCode::Syntax,
+                        dim.span,
+                        "expected the vector dimension, a positive integer",
+                    ));
+                };
+                let Ok(n) = n.parse::<u32>() else {
+                    return Err(Diagnostic::error(
+                        DiagnosticCode::Syntax,
+                        dim.span,
+                        "the vector dimension must be a positive integer",
+                    ));
+                };
+                if n == 0 {
+                    return Err(Diagnostic::error(
+                        DiagnosticCode::Syntax,
+                        dim.span,
+                        "the vector dimension must be at least 1",
+                    ));
+                }
+                close(self)?;
+                CqlType::Vector(Box::new(t), n)
             }
             "tuple" => {
                 generic(self)?;
@@ -702,7 +1141,7 @@ impl<'a> Parser<'a> {
         } else {
             let mut items = Vec::new();
             loop {
-                let expr = self.parse_expr()?;
+                let expr = self.parse_arith()?;
                 let alias = if self.eat_kw("AS") {
                     Some(self.ident()?)
                 } else {
@@ -733,10 +1172,21 @@ impl<'a> Parser<'a> {
             }
         }
         let mut order_by = Vec::new();
+        let mut ann = None;
         if self.eat_kw("ORDER") {
             self.expect_kw("BY")?;
             loop {
                 let col = self.ident()?;
+                if self.at_kw("ANN") && self.kw_at(1, "OF") {
+                    self.bump();
+                    self.bump();
+                    let vector = self.parse_arith()?;
+                    ann = Some((col, vector));
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                    continue;
+                }
                 let order = self.parse_order()?.unwrap_or(Order::Asc);
                 order_by.push((col, order));
                 if !self.eat(&TokenKind::Comma) {
@@ -769,6 +1219,7 @@ impl<'a> Parser<'a> {
             where_clause,
             group_by,
             order_by,
+            ann,
             per_partition_limit,
             limit,
             allow_filtering,
@@ -846,9 +1297,7 @@ impl<'a> Parser<'a> {
                     RelOp::Contains
                 }
             }
-            TokenKind::Ident(s) if s.eq_ignore_ascii_case("LIKE") => {
-                return Err(self.unsupported(op_tok.span, "operator `LIKE`"));
-            }
+            TokenKind::Ident(s) if s.eq_ignore_ascii_case("LIKE") => RelOp::Like,
             _ => return Err(self.expected("a comparison operator")),
         };
         self.bump();
@@ -866,7 +1315,7 @@ impl<'a> Parser<'a> {
             self.expect(&TokenKind::RParen)?;
             Rhs::InList(items)
         } else {
-            Rhs::Expr(self.parse_expr()?)
+            Rhs::Expr(self.parse_arith()?)
         };
         let end = self.tokens[self.pos - 1].span;
         Ok(Relation {
@@ -892,6 +1341,87 @@ impl<'a> Parser<'a> {
         let result = f(self);
         self.depth -= 1;
         result
+    }
+
+    /// An expression with arithmetic operators (`+ - * / %`, Cassandra 4.0).
+    fn parse_arith(&mut self) -> PResult<Expr> {
+        self.nested("expression", |p| p.parse_additive())
+    }
+
+    fn parse_additive(&mut self) -> PResult<Expr> {
+        let mut lhs = self.parse_multiplicative()?;
+        loop {
+            let op = match self.peek().kind {
+                TokenKind::Plus => BinOp::Add,
+                TokenKind::Minus => BinOp::Sub,
+                _ => return Ok(lhs),
+            };
+            self.bump();
+            let rhs = self.parse_multiplicative()?;
+            let span = lhs.span.to(rhs.span);
+            lhs = Expr {
+                kind: ExprKind::Binary(op, Box::new(lhs), Box::new(rhs)),
+                span,
+            };
+        }
+    }
+
+    fn parse_multiplicative(&mut self) -> PResult<Expr> {
+        let mut lhs = self.parse_unary()?;
+        loop {
+            let op = match self.peek().kind {
+                TokenKind::Star => BinOp::Mul,
+                TokenKind::Slash => BinOp::Div,
+                TokenKind::Percent => BinOp::Rem,
+                _ => return Ok(lhs),
+            };
+            self.bump();
+            let rhs = self.parse_unary()?;
+            let span = lhs.span.to(rhs.span);
+            lhs = Expr {
+                kind: ExprKind::Binary(op, Box::new(lhs), Box::new(rhs)),
+                span,
+            };
+        }
+    }
+
+    fn parse_unary(&mut self) -> PResult<Expr> {
+        if self.peek().kind == TokenKind::Minus && !matches!(self.peek_n(1), TokenKind::Number(_)) {
+            let start = self.bump().span;
+            let inner = self.parse_unary()?;
+            let span = start.to(inner.span);
+            return Ok(Expr {
+                kind: ExprKind::Neg(Box::new(inner)),
+                span,
+            });
+        }
+        self.parse_expr()
+    }
+
+    fn skip_column_clause(&mut self) {
+        let mut depth = 0usize;
+        loop {
+            match &self.peek().kind {
+                TokenKind::Eof | TokenKind::Semi => break,
+                TokenKind::Comma if depth == 0 => break,
+                TokenKind::RParen if depth == 0 => break,
+                TokenKind::Ident(k)
+                    if depth == 0
+                        && (k.eq_ignore_ascii_case("STATIC")
+                            || k.eq_ignore_ascii_case("PRIMARY")
+                            || k.eq_ignore_ascii_case("MASKED")
+                            || k.eq_ignore_ascii_case("CHECK")) =>
+                {
+                    break;
+                }
+                TokenKind::LParen | TokenKind::LBrace | TokenKind::LBracket => depth += 1,
+                TokenKind::RParen | TokenKind::RBrace | TokenKind::RBracket => {
+                    depth = depth.saturating_sub(1)
+                }
+                _ => {}
+            }
+            self.bump();
+        }
     }
 
     fn parse_expr(&mut self) -> PResult<Expr> {
@@ -972,11 +1502,11 @@ impl<'a> Parser<'a> {
             }
             TokenKind::LParen => {
                 self.bump();
-                let mut items = vec![self.parse_expr()?];
+                let mut items = vec![self.parse_arith()?];
                 let mut tuple = false;
                 while self.eat(&TokenKind::Comma) {
                     tuple = true;
-                    items.push(self.parse_expr()?);
+                    items.push(self.parse_arith()?);
                 }
                 let end = self.expect(&TokenKind::RParen)?;
                 if tuple {
@@ -1015,7 +1545,7 @@ impl<'a> Parser<'a> {
         let mut items = Vec::new();
         if &self.peek().kind != close {
             loop {
-                items.push(self.parse_expr()?);
+                items.push(self.parse_arith()?);
                 if !self.eat(&TokenKind::Comma) {
                     break;
                 }
@@ -1317,7 +1847,10 @@ fn number_literal(n: &str, negative: bool) -> Literal {
     } else {
         n.to_string()
     };
-    if n.contains(['.', 'e', 'E']) {
+    // The lexer only emits a letter-terminated number for duration literals (`1d`, `3h30m`).
+    if n.ends_with(|c: char| c.is_ascii_alphabetic()) {
+        Literal::Duration(text)
+    } else if n.contains(['.', 'e', 'E']) {
         Literal::Float(text)
     } else {
         Literal::Integer(text)

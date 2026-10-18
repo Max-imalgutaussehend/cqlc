@@ -366,6 +366,19 @@ impl<'a> Checker<'a> {
             ExprKind::Call { name, args, star } => {
                 self.call(ctx, table, e, name, args, *star, hint, place)?
             }
+            ExprKind::Binary(op, l, r) => self.arith(ctx, table, e, *op, l, r, hint, place)?,
+            ExprKind::Neg(inner) => {
+                let t = self.expr(ctx, table, inner, None, hint, place)?;
+                if !t.ty.is_numeric() {
+                    self.error(
+                        Code::TypeMismatch,
+                        e.span,
+                        format!("unary `-` needs a number, found `{}`", t.ty),
+                    );
+                    return None;
+                }
+                t
+            }
             ExprKind::Cast(inner, to) => {
                 let t = self.expr(ctx, table, inner, None, hint, place)?;
                 if !cast_ok(&t.ty, to) {
@@ -403,6 +416,77 @@ impl<'a> Checker<'a> {
             }
         }
         Some(typed)
+    }
+
+    /// Arithmetic as Cassandra 4.0+ defines it: numbers (the result is the wider type), `timestamp`/`date`
+    /// plus or minus a `duration`, and `+` on strings.
+    #[allow(clippy::too_many_arguments)]
+    fn arith(
+        &mut self,
+        ctx: &mut Ctx,
+        table: &'a Table,
+        e: &Expr,
+        op: BinOp,
+        l: &Expr,
+        r: &Expr,
+        hint: &Hint,
+        place: Place,
+    ) -> Option<Typed> {
+        let is_marker = |x: &Expr| matches!(x.kind, ExprKind::Marker(_));
+        // Type the side that is not a bare marker first; the marker then takes a compatible type.
+        let (lt, rt) = if is_marker(l) && !is_marker(r) {
+            let rt = self.expr(ctx, table, r, None, hint, place)?;
+            let want = if rt.ty.is_numeric()
+                || matches!(rt.ty.unfrozen(), CqlType::Text | CqlType::Ascii)
+            {
+                rt.ty.clone()
+            } else {
+                CqlType::Duration
+            };
+            (self.expr(ctx, table, l, Some(&want), hint, place)?, rt)
+        } else {
+            let lt = self.expr(ctx, table, l, None, hint, place)?;
+            // Only a bare marker needs an expected type; typed operands are checked by the operator rules.
+            let want = if !is_marker(r) {
+                None
+            } else if lt.ty.is_numeric()
+                || matches!(lt.ty.unfrozen(), CqlType::Text | CqlType::Ascii)
+            {
+                Some(lt.ty.clone())
+            } else if matches!(lt.ty.unfrozen(), CqlType::Timestamp | CqlType::Date) {
+                Some(CqlType::Duration)
+            } else {
+                None
+            };
+            (lt, self.expr(ctx, table, r, want.as_ref(), hint, place)?)
+        };
+        let (a, b) = (lt.ty.unfrozen().clone(), rt.ty.unfrozen().clone());
+        let nullable = lt.nullable || rt.nullable;
+        let ty = if a.is_numeric() && b.is_numeric() {
+            numeric_result(&a, &b)
+        } else if matches!(op, BinOp::Add | BinOp::Sub)
+            && matches!(a, CqlType::Timestamp | CqlType::Date)
+            && b == CqlType::Duration
+        {
+            a
+        } else if op == BinOp::Add
+            && matches!(a, CqlType::Text | CqlType::Ascii)
+            && matches!(b, CqlType::Text | CqlType::Ascii)
+        {
+            if a == CqlType::Ascii && b == CqlType::Ascii {
+                CqlType::Ascii
+            } else {
+                CqlType::Text
+            }
+        } else {
+            self.error(
+                Code::TypeMismatch,
+                e.span,
+                format!("`{a} {} {b}` is not defined in CQL", op.symbol()),
+            );
+            return None;
+        };
+        Some(Typed { ty, nullable })
     }
 
     fn literal(
@@ -446,6 +530,7 @@ impl<'a> Checker<'a> {
                     Literal::Bool(_) => CqlType::Boolean,
                     Literal::Uuid(_) => CqlType::Uuid,
                     Literal::Blob(_) => CqlType::Blob,
+                    Literal::Duration(_) => CqlType::Duration,
                     Literal::Null => {
                         self.error(
                             Code::TypeMismatch,
@@ -499,6 +584,26 @@ impl<'a> Checker<'a> {
         match (&e.kind, want.unfrozen()) {
             (ExprKind::List(items), CqlType::List(el))
             | (ExprKind::Set(items), CqlType::Set(el)) => {
+                let mut ok = true;
+                for it in items {
+                    ok &= self.expr(ctx, table, it, Some(el), &inner, place).is_some();
+                }
+                ok.then(|| Typed {
+                    ty: want.clone(),
+                    nullable: false,
+                })
+            }
+            (ExprKind::List(items), CqlType::Vector(el, dim)) => {
+                if items.len() != *dim as usize {
+                    return mismatch(
+                        self,
+                        &format!(
+                            "a vector of {} element{}",
+                            items.len(),
+                            if items.len() == 1 { "" } else { "s" }
+                        ),
+                    );
+                }
                 let mut ok = true;
                 for it in items {
                     ok &= self.expr(ctx, table, it, Some(el), &inner, place).is_some();
@@ -596,6 +701,23 @@ impl<'a> Checker<'a> {
             (ExprKind::Udt(_), _) => mismatch(self, "user-defined type"),
             _ => unreachable!("composite called with a non-composite expression"),
         }
+    }
+
+    fn unknown_function(&mut self, name: &Ident) -> Option<Typed> {
+        self.diags.push(
+            Diagnostic::error(
+                Code::UnknownFunction,
+                name.span,
+                format!("unknown or unsupported function `{}`", name.name),
+            )
+            .with_help(
+                "supported: now, uuid, currentTimestamp/Date/Time/TimeUUID, toTimestamp, toDate, toUnixTimestamp, \
+                 minTimeuuid, maxTimeuuid, token, writetime, maxwritetime, ttl, count, sum, avg, min, max, cast, \
+                 abs, exp, log, log10, round, map_keys, map_values, collection_*, similarity_*, mask_*, toJson, \
+                 <type>AsBlob, blobAs<type>, and user-defined functions from the schema",
+            ),
+        );
+        None
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -753,7 +875,7 @@ impl<'a> Checker<'a> {
                 }
                 plain(CqlType::BigInt)
             }
-            "writetime" | "ttl" => {
+            "writetime" | "ttl" | "maxwritetime" => {
                 if !only_select(self) || !want_args(self, 1) {
                     return None;
                 }
@@ -767,7 +889,7 @@ impl<'a> Checker<'a> {
                 };
                 let col = self.column(table, id)?;
                 if col.is_key()
-                    || col.cql_type.is_collection()
+                    || (col.cql_type.is_collection() && lname != "maxwritetime")
                     || matches!(col.cql_type, CqlType::Counter)
                 {
                     self.error(
@@ -858,21 +980,232 @@ impl<'a> Checker<'a> {
                     nullable: lname == "min" || lname == "max",
                 })
             }
-            _ => {
-                self.diags.push(
-                    Diagnostic::error(
-                        Code::UnknownFunction,
-                        name.span,
-                        format!("unknown or unsupported function `{}`", name.name),
-                    )
-                    .with_help(
-                        "supported: now, uuid, currentTimestamp/Date/Time/TimeUUID, toTimestamp, toDate, \
-                         toUnixTimestamp, minTimeuuid, maxTimeuuid, token, writetime, ttl, count, sum, avg, \
-                         min, max, cast",
-                    ),
-                );
-                None
+            "abs" | "exp" | "log" | "log10" | "round" => {
+                if !want_args(self, 1) {
+                    return None;
+                }
+                let a = self.expr(ctx, table, &args[0], None, hint, place)?;
+                if !a.ty.is_numeric() || matches!(a.ty.unfrozen(), CqlType::Counter) {
+                    self.error(
+                        Code::TypeMismatch,
+                        args[0].span,
+                        format!("`{lname}` needs a number, found `{}`", a.ty),
+                    );
+                    return None;
+                }
+                Some(Typed {
+                    ty: a.ty.unfrozen().clone(),
+                    nullable: a.nullable,
+                })
             }
+            "map_keys" | "map_values" | "collection_count" | "collection_min"
+            | "collection_max" | "collection_sum" | "collection_avg" => {
+                if !want_args(self, 1) {
+                    return None;
+                }
+                let a = self.expr(ctx, table, &args[0], None, hint, place)?;
+                let bad = |this: &mut Self, what: &str| {
+                    this.error(
+                        Code::TypeMismatch,
+                        args[0].span,
+                        format!("`{lname}` needs {what}, found `{}`", a.ty),
+                    );
+                    None
+                };
+                let ty = match (lname.as_str(), a.ty.unfrozen()) {
+                    ("map_keys", CqlType::Map(k, _)) => CqlType::Set(k.clone()),
+                    ("map_values", CqlType::Map(_, v)) => CqlType::List(v.clone()),
+                    ("map_keys" | "map_values", _) => return bad(self, "a map"),
+                    ("collection_count", CqlType::List(_) | CqlType::Set(_) | CqlType::Map(..)) => {
+                        CqlType::Int
+                    }
+                    ("collection_count", _) => return bad(self, "a list, set or map"),
+                    ("collection_min" | "collection_max", CqlType::List(t) | CqlType::Set(t)) => {
+                        (**t).clone()
+                    }
+                    ("collection_sum" | "collection_avg", CqlType::List(t) | CqlType::Set(t))
+                        if t.is_numeric() =>
+                    {
+                        (**t).clone()
+                    }
+                    ("collection_sum" | "collection_avg", _) => {
+                        return bad(self, "a list or set of numbers");
+                    }
+                    _ => return bad(self, "a list or set"),
+                };
+                Some(Typed { ty, nullable: true })
+            }
+            "similarity_cosine" | "similarity_euclidean" | "similarity_dot_product" => {
+                if !want_args(self, 2) {
+                    return None;
+                }
+                let marker = |x: &Expr| matches!(x.kind, ExprKind::Marker(_));
+                let (first, second) = if marker(&args[0]) && !marker(&args[1]) {
+                    (1, 0)
+                } else {
+                    (0, 1)
+                };
+                let a = self.expr(ctx, table, &args[first], None, hint, place)?;
+                let b = self.expr(ctx, table, &args[second], Some(&a.ty), hint, place)?;
+                for (t, e) in [(&a, &args[first]), (&b, &args[second])] {
+                    if !matches!(t.ty.unfrozen(), CqlType::Vector(el, _) if **el == CqlType::Float)
+                    {
+                        self.error(
+                            Code::TypeMismatch,
+                            e.span,
+                            format!(
+                                "`{lname}` needs `vector<float, N>` arguments, found `{}`",
+                                t.ty
+                            ),
+                        );
+                        return None;
+                    }
+                }
+                if !same_type(&a.ty, &b.ty) {
+                    self.error(
+                        Code::TypeMismatch,
+                        e.span,
+                        format!("`{lname}` needs vectors of the same dimension"),
+                    );
+                    return None;
+                }
+                Some(Typed {
+                    ty: CqlType::Float,
+                    nullable: a.nullable || b.nullable,
+                })
+            }
+            "tojson" => {
+                if !want_args(self, 1) {
+                    return None;
+                }
+                let a = self.expr(ctx, table, &args[0], None, hint, place)?;
+                Some(Typed {
+                    ty: CqlType::Text,
+                    nullable: a.nullable,
+                })
+            }
+            "dateof" | "unixtimestampof" => {
+                if !want_args(self, 1) {
+                    return None;
+                }
+                let a = self.expr(ctx, table, &args[0], Some(&CqlType::TimeUuid), hint, place)?;
+                if a.ty.unfrozen() != &CqlType::TimeUuid {
+                    self.error(
+                        Code::TypeMismatch,
+                        args[0].span,
+                        format!("`{lname}` needs a timeuuid, found `{}`", a.ty),
+                    );
+                    return None;
+                }
+                let ty = if lname == "dateof" {
+                    CqlType::Timestamp
+                } else {
+                    CqlType::BigInt
+                };
+                Some(Typed {
+                    ty,
+                    nullable: a.nullable,
+                })
+            }
+            "mask_null" | "mask_default" | "mask_replace" | "mask_inner" | "mask_outer"
+            | "mask_hash" => {
+                if args.is_empty() {
+                    self.error(
+                        Code::Arity,
+                        e.span,
+                        format!("function `{lname}` needs at least one argument"),
+                    );
+                    return None;
+                }
+                let a = self.expr(ctx, table, &args[0], None, hint, place)?;
+                for extra in &args[1..] {
+                    let want = match lname.as_str() {
+                        "mask_replace" => Some(a.ty.clone()),
+                        _ => None,
+                    };
+                    match (&extra.kind, want) {
+                        (ExprKind::Marker(_), None) => {
+                            let t = if matches!(lname.as_str(), "mask_inner" | "mask_outer")
+                                && !args[1..].is_empty()
+                            {
+                                CqlType::Int
+                            } else {
+                                CqlType::Text
+                            };
+                            self.expr(ctx, table, extra, Some(&t), hint, place)?;
+                        }
+                        (_, w) => {
+                            self.expr(ctx, table, extra, w.as_ref(), hint, place)?;
+                        }
+                    }
+                }
+                let ty = match lname.as_str() {
+                    "mask_hash" => CqlType::Blob,
+                    "mask_inner" | "mask_outer" => CqlType::Text,
+                    _ => a.ty.clone(),
+                };
+                Some(Typed {
+                    ty,
+                    nullable: a.nullable,
+                })
+            }
+            other if other.ends_with("asblob") || other.starts_with("blobas") => {
+                let (ty_name, to_blob) = match other.strip_suffix("asblob") {
+                    Some(t) => (t, true),
+                    None => (other.trim_start_matches("blobas"), false),
+                };
+                let Some(ty) = CqlType::from_primitive(ty_name) else {
+                    return self.unknown_function(name);
+                };
+                if !want_args(self, 1) {
+                    return None;
+                }
+                if to_blob {
+                    let a = self.expr(ctx, table, &args[0], Some(&ty), hint, place)?;
+                    Some(Typed {
+                        ty: CqlType::Blob,
+                        nullable: a.nullable,
+                    })
+                } else {
+                    let a = self.expr(ctx, table, &args[0], Some(&CqlType::Blob), hint, place)?;
+                    Some(Typed {
+                        ty,
+                        nullable: a.nullable,
+                    })
+                }
+            }
+            other if self.schema.function(other).is_some() => {
+                let f = self.schema.function(other).expect("checked");
+                if f.aggregate && place != Place::Select {
+                    self.error(
+                        Code::InvalidRestriction,
+                        e.span,
+                        format!("aggregate `{lname}` is only allowed in the selection list"),
+                    );
+                    return None;
+                }
+                if star || args.len() != f.args.len() {
+                    self.error(
+                        Code::Arity,
+                        e.span,
+                        format!(
+                            "function `{lname}` takes {} argument{}",
+                            f.args.len(),
+                            if f.args.len() == 1 { "" } else { "s" }
+                        ),
+                    );
+                    return None;
+                }
+                let mut ok = true;
+                for (a, want) in args.iter().zip(&f.args) {
+                    ok &= self.expr(ctx, table, a, Some(want), hint, place).is_some();
+                }
+                ok.then(|| Typed {
+                    ty: f.returns.clone(),
+                    nullable: true,
+                })
+            }
+            _ => self.unknown_function(name),
         }
     }
 
@@ -978,6 +1311,19 @@ impl<'a> Checker<'a> {
                                     );
                                     false
                                 }
+                            }
+                        }
+                        (RelOp::Like, Rhs::Expr(e)) => {
+                            if matches!(ty.unfrozen(), CqlType::Text | CqlType::Ascii) {
+                                self.expr(ctx, table, e, Some(&CqlType::Text), &hint, Place::Where)
+                                    .is_some()
+                            } else {
+                                self.error(
+                                    Code::TypeMismatch,
+                                    id.span,
+                                    format!("`LIKE` needs a text column, `{}` is `{ty}`", col.name),
+                                );
+                                false
                             }
                         }
                         (_, Rhs::Expr(e)) => self
@@ -1366,6 +1712,76 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+        if let Some((col, vector)) = &s.ann {
+            if let Some(c) = self.column(table, col) {
+                let is_vector = matches!(c.cql_type.unfrozen(), CqlType::Vector(..));
+                if !is_vector {
+                    self.error(
+                        Code::TypeMismatch,
+                        col.span,
+                        format!(
+                            "`ANN OF` needs a vector column, `{}` is `{}`",
+                            c.name, c.cql_type
+                        ),
+                    );
+                } else {
+                    let sai = table
+                        .indexes
+                        .iter()
+                        .any(|i| i.column == c.name && i.class == crate::schema::IndexClass::Sai);
+                    if !sai {
+                        self.diags.push(
+                            Diagnostic::error(
+                                Code::InvalidRestriction,
+                                col.span,
+                                format!(
+                                    "`ORDER BY {} ANN OF ...` needs a SAI index on `{}`",
+                                    c.name, c.name
+                                ),
+                            )
+                            .with_help(format!(
+                                "CREATE INDEX ON {}({}) USING 'sai';",
+                                table.name, c.name
+                            )),
+                        );
+                    }
+                    let hint = Hint {
+                        name: format!("{}_ann", c.name),
+                        source: ParamSource::Restriction {
+                            column: c.name.clone(),
+                            op: RelOp::Eq,
+                        },
+                        nullable: false,
+                    };
+                    self.expr(ctx, table, vector, Some(&c.cql_type), &hint, Place::Where);
+                }
+            }
+            if !s.order_by.is_empty() {
+                self.error(
+                    Code::InvalidRestriction,
+                    s.span,
+                    "`ANN OF` cannot be combined with another `ORDER BY` column",
+                );
+            }
+            match &s.limit {
+                None => self.error(
+                    Code::InvalidRestriction,
+                    s.span,
+                    "`ORDER BY ... ANN OF` requires a `LIMIT` (at most 1000)",
+                ),
+                Some(Expr {
+                    kind: ExprKind::Literal(Literal::Integer(n)),
+                    span,
+                }) if n.parse::<u64>().is_ok_and(|n| n > 1000) => {
+                    self.error(
+                        Code::InvalidRestriction,
+                        *span,
+                        "the `LIMIT` of an `ANN OF` query cannot exceed 1000",
+                    );
+                }
+                _ => {}
+            }
+        }
         for (e, name, source) in [
             (
                 &s.per_partition_limit,
@@ -1408,13 +1824,45 @@ impl<'a> Checker<'a> {
             }
         }
         let restricted = |name: &str| rs.iter().any(|r| r.column.name == name);
+        let index_serves = |r: &Restriction<'_>| -> bool {
+            use crate::ast::IndexKind as K;
+            use crate::schema::IndexClass as C;
+            table.indexes.iter().any(|i| {
+                i.column == r.column.name
+                    && matches!(
+                        (&i.class, r.op),
+                        (C::Custom(_), _)
+                            | (C::Legacy, RelOp::Eq | RelOp::Contains | RelOp::ContainsKey)
+                            | (
+                                C::Sai,
+                                RelOp::Eq
+                                    | RelOp::Lt
+                                    | RelOp::Le
+                                    | RelOp::Gt
+                                    | RelOp::Ge
+                                    | RelOp::Contains
+                                    | RelOp::ContainsKey
+                            )
+                            | (
+                                C::Sasi,
+                                RelOp::Eq
+                                    | RelOp::Lt
+                                    | RelOp::Le
+                                    | RelOp::Gt
+                                    | RelOp::Ge
+                                    | RelOp::Like
+                            )
+                    )
+                    && (i.kind != K::Keys || r.op == RelOp::ContainsKey)
+            })
+        };
         let missing: Vec<&str> = table
             .partition_key
             .iter()
             .filter(|k| !restricted(k))
             .map(String::as_str)
             .collect();
-        if !missing.is_empty() {
+        if !missing.is_empty() && s.ann.is_none() {
             self.diags.push(
                 Diagnostic::warning(
                     Code::BroadScan,
@@ -1433,7 +1881,7 @@ impl<'a> Checker<'a> {
                 Diagnostic::warning(Code::AllowFiltering, s.span, "query uses `ALLOW FILTERING`")
                     .with_help("filtering can be expensive; prefer a table that matches the access pattern"),
             );
-        } else if let Some(r) = rs.iter().find(|r| !r.column.is_key()) {
+        } else if let Some(r) = rs.iter().find(|r| !r.column.is_key() && !index_serves(r)) {
             self.diags.push(
                 Diagnostic::warning(
                     Code::NonKeyRestriction,
@@ -1443,7 +1891,11 @@ impl<'a> Checker<'a> {
                         r.column.name
                     ),
                 )
-                .with_help("Cassandra rejects this unless a secondary index exists"),
+                .with_help(if table.index_for(&r.column.name).is_some() {
+                    "the index on this column does not support this operator"
+                } else {
+                    "Cassandra rejects this unless a secondary index exists"
+                }),
             );
         }
         // Clustering columns must be restricted left to right.
@@ -1540,6 +1992,17 @@ impl<'a> Checker<'a> {
 
     fn insert(&mut self, s: &Insert, ctx: &mut Ctx) -> Option<Outcome<'a>> {
         let table = self.table(&s.table)?;
+        if let Some(base) = &table.base_table {
+            self.error(
+                Code::InvalidRestriction,
+                s.span,
+                format!(
+                    "`{}` is a materialized view of `{base}` and cannot be modified",
+                    table.name
+                ),
+            );
+            return None;
+        }
         match &s.source {
             InsertSource::Json(e) => {
                 let hint = Hint {
@@ -1620,6 +2083,17 @@ impl<'a> Checker<'a> {
 
     fn update(&mut self, s: &Update, ctx: &mut Ctx) -> Option<Outcome<'a>> {
         let table = self.table(&s.table)?;
+        if let Some(base) = &table.base_table {
+            self.error(
+                Code::InvalidRestriction,
+                s.span,
+                format!(
+                    "`{}` is a materialized view of `{base}` and cannot be modified",
+                    table.name
+                ),
+            );
+            return None;
+        }
         for a in &s.assignments {
             self.assignment(ctx, table, a);
         }
@@ -1636,6 +2110,17 @@ impl<'a> Checker<'a> {
 
     fn delete(&mut self, s: &Delete, ctx: &mut Ctx) -> Option<Outcome<'a>> {
         let table = self.table(&s.table)?;
+        if let Some(base) = &table.base_table {
+            self.error(
+                Code::InvalidRestriction,
+                s.span,
+                format!(
+                    "`{}` is a materialized view of `{base}` and cannot be modified",
+                    table.name
+                ),
+            );
+            return None;
+        }
         for t in &s.targets {
             self.delete_target(ctx, table, t);
         }
@@ -1984,6 +2469,7 @@ fn literal_fits(l: &Literal, ty: &CqlType) -> bool {
         Literal::Bool(_) => matches!(t, Boolean),
         Literal::Uuid(_) => matches!(t, Uuid | TimeUuid),
         Literal::Blob(_) => matches!(t, Blob),
+        Literal::Duration(_) => matches!(t, Duration),
     }
 }
 
@@ -1992,6 +2478,7 @@ fn same_type(a: &CqlType, b: &CqlType) -> bool {
     use CqlType::*;
     match (a.unfrozen(), b.unfrozen()) {
         (List(x), List(y)) | (Set(x), Set(y)) => same_type(x, y),
+        (Vector(x, n), Vector(y, m)) => n == m && same_type(x, y),
         (Map(k1, v1), Map(k2, v2)) => same_type(k1, k2) && same_type(v1, v2),
         (Tuple(x), Tuple(y)) => x.len() == y.len() && x.iter().zip(y).all(|(p, q)| same_type(p, q)),
         (x, y) => x == y,
@@ -2015,7 +2502,7 @@ fn cast_ok(from: &CqlType, to: &CqlType) -> bool {
     let primitive = |x: &CqlType| {
         !matches!(
             x,
-            List(_) | Set(_) | Map(..) | Tuple(_) | Udt(_) | Frozen(_)
+            List(_) | Set(_) | Map(..) | Tuple(_) | Udt(_) | Frozen(_) | Vector(..)
         )
     };
     if !primitive(f) || !primitive(t) {
@@ -2061,6 +2548,35 @@ fn unique_names(params: &mut [Param]) {
         while !used.insert(p.name.clone()) {
             p.name = format!("{base}_{n}");
             n += 1;
+        }
+    }
+}
+
+/// Result type of arithmetic between two numeric types, as `OperationFcts.returnType` in Cassandra.
+fn numeric_result(a: &CqlType, b: &CqlType) -> CqlType {
+    use CqlType::*;
+    let size = |t: &CqlType| match t {
+        TinyInt => 1,
+        SmallInt => 2,
+        Int | Float => 4,
+        BigInt | Double | Counter => 8,
+        _ => usize::MAX,
+    };
+    let floating = |t: &CqlType| matches!(t, Float | Double | Decimal);
+    let n = size(a).max(size(b));
+    if floating(a) || floating(b) {
+        match n {
+            4 => Float,
+            8 => Double,
+            _ => Decimal,
+        }
+    } else {
+        match n {
+            1 => TinyInt,
+            2 => SmallInt,
+            4 => Int,
+            8 => BigInt,
+            _ => VarInt,
         }
     }
 }

@@ -1,0 +1,7 @@
+version = 1
+schema = "schema"
+queries = "queries"
+
+[rust]
+out = "src/queries.rs"
+time_library = "native"

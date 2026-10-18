@@ -32,3 +32,13 @@ DELETE FROM all_types WHERE id = ? AND seq > ?;
 
 -- name: GetHits :one
 SELECT hits FROM counters WHERE id = ?;
+
+-- name: InsertVectorItem :exec
+INSERT INTO vector_items (id, floats, ints, label) VALUES (?, ?, ?, ?);
+
+-- name: GetVectorItem :one
+SELECT id, floats, ints, label FROM vector_items WHERE id = ?;
+
+-- allow: CQL201
+-- name: NearestVectorItems :many
+SELECT id, label, similarity_cosine(floats, ?) AS score FROM vector_items ORDER BY floats ANN OF ? LIMIT 10;

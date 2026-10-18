@@ -27,11 +27,11 @@ jobs:
       - run: cargo test --workspace
       - run: cargo test --workspace --doc
       # Generated code must compile against the pinned driver ...
-      - run: cargo build -p cqlc-example-basic -p cqlc-example-shop -p cqlc-compile-types
+      - run: cargo build -p cqlc-example-basic -p cqlc-example-shop -p cqlc-example-cassandra5 -p cqlc-compile-types
       # ... and the committed output must match the sources, without warnings.
       - name: generated files are current
         run: |
-          for p in examples/basic examples/shop tests/compile-types; do
+          for p in examples/basic examples/shop examples/cassandra5 tests/compile-types; do
             cargo run -q -p cqlc -- -c "$p/cqlc.toml" generate --check --deny-warnings
           done
 
@@ -65,6 +65,7 @@ jobs:
           - name: Cassandra 4.1
             run: docker run -d --name db -p 9042:9042 -e MAX_HEAP_SIZE=512M -e HEAP_NEWSIZE=128M -e CASSANDRA_BROADCAST_RPC_ADDRESS=127.0.0.1 cassandra:4.1
           - name: Cassandra 5.0
+            c5: true
             run: docker run -d --name db -p 9042:9042 -e MAX_HEAP_SIZE=512M -e HEAP_NEWSIZE=128M -e CASSANDRA_BROADCAST_RPC_ADDRESS=127.0.0.1 cassandra:5.0
           - name: ScyllaDB
             run: docker run -d --name db -p 9042:9042 scylladb/scylla:latest --smp 1 --memory 750M --overprovisioned 1 --developer-mode 1
@@ -88,6 +89,16 @@ jobs:
           exit 1
       - run: cargo run -p cqlc-example-basic
       - run: cargo run -p cqlc-example-shop
+      - name: Cassandra 5.0 features (vector search, SAI, masking)
+        if: matrix.c5
+        run: |
+          docker exec db sh -c "echo 'dynamic_data_masking_enabled: true' >> /etc/cassandra/cassandra.yaml"
+          docker restart db
+          for i in $(seq 1 90); do
+            docker exec db cqlsh -e 'select release_version from system.local' >/dev/null 2>&1 && break
+            sleep 5
+          done
+          cargo run -p cqlc-example-cassandra5
 
   fuzz:
     name: fuzz (60s per target)

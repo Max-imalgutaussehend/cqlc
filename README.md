@@ -51,6 +51,9 @@ let user: Option<GetUserByIdRow> = queries.get_user_by_id(user_id).await?;
 * **Typed everything.** Parameters and results get exact types, with null and absent values kept
   separate. UDTs become structs, lightweight transactions return an `applied` outcome, large
   results stream.
+* **Current Cassandra.** Vector columns and `ORDER BY ... ANN OF` search, SAI indexes, arithmetic, the 4.0/5.0
+  functions (`similarity_*`, `maxwritetime`, `collection_*`, ...), materialized views, `ALTER`/`DROP` and user-defined
+  functions are understood, checked against the grammar of Apache Cassandra 4.0, 4.1 and 5.0.
 * **Deterministic and offline.** Same input, same output. CI can verify it with
   `cqlc generate --check`.
 

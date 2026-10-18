@@ -29,6 +29,8 @@ pub enum TokenKind {
     Semi,
     Dot,
     Star,
+    Slash,
+    Percent,
     Plus,
     Minus,
     Colon,
@@ -61,6 +63,8 @@ impl TokenKind {
             TokenKind::Semi => "`;`".into(),
             TokenKind::Dot => "`.`".into(),
             TokenKind::Star => "`*`".into(),
+            TokenKind::Slash => "`/`".into(),
+            TokenKind::Percent => "`%`".into(),
             TokenKind::Plus => "`+`".into(),
             TokenKind::Minus => "`-`".into(),
             TokenKind::Colon => "`:`".into(),
@@ -257,6 +261,14 @@ pub fn lex(file: FileId, src: &str) -> (Lexed, Vec<Diagnostic>) {
                         TokenKind::Uuid(src[start..i].to_string()),
                         span(start, i),
                     );
+                } else if c.is_ascii_digit() && duration_end(b, i).is_some() {
+                    // `1d`, `3h30m`: a duration literal is kept verbatim as a `Number` token.
+                    i = duration_end(b, i).expect("checked");
+                    push(
+                        &mut out,
+                        TokenKind::Number(src[start..i].to_string()),
+                        span(start, i),
+                    );
                 } else if c.is_ascii_digit() {
                     i = lex_number(b, i);
                     if i < b.len() && (b[i].is_ascii_alphabetic() || b[i] == b'_') {
@@ -301,6 +313,8 @@ pub fn lex(file: FileId, src: &str) -> (Lexed, Vec<Diagnostic>) {
                     (b';', _) => (Some(TokenKind::Semi), 1),
                     (b'.', _) => (Some(TokenKind::Dot), 1),
                     (b'*', _) => (Some(TokenKind::Star), 1),
+                    (b'/', _) => (Some(TokenKind::Slash), 1),
+                    (b'%', _) => (Some(TokenKind::Percent), 1),
                     (b'+', _) => (Some(TokenKind::Plus), 1),
                     (b'-', _) => (Some(TokenKind::Minus), 1),
                     (b':', _) => (Some(TokenKind::Colon), 1),
@@ -337,6 +351,38 @@ fn line_end(b: &[u8], mut i: usize) -> usize {
         i += 1;
     }
     i
+}
+
+/// End of a duration literal (`1y2mo3w4d5h6m7s8ms9us10ns`) starting at `i`, if one does.
+fn duration_end(b: &[u8], mut i: usize) -> Option<usize> {
+    let mut units = 0;
+    loop {
+        let digits = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == digits {
+            break;
+        }
+        let rest = &b[i..];
+        let len = if rest.starts_with(b"mo")
+            || rest.starts_with(b"ms")
+            || rest.starts_with(b"us")
+            || rest.starts_with(b"ns")
+        {
+            2
+        } else if matches!(rest.first(), Some(b'y' | b'w' | b'd' | b'h' | b'm' | b's')) {
+            1
+        } else {
+            return None;
+        };
+        i += len;
+        units += 1;
+    }
+    let boundary = !b
+        .get(i)
+        .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_');
+    (units > 0 && boundary).then_some(i)
 }
 
 fn lex_number(b: &[u8], mut i: usize) -> usize {

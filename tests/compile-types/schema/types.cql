@@ -31,3 +31,12 @@ CREATE TABLE counters (
     id uuid PRIMARY KEY,
     hits counter
 );
+
+-- Cassandra 5.0: vector type and SAI index
+CREATE TABLE vector_items (
+    id int PRIMARY KEY,
+    floats vector<float, 4>,
+    ints vector<int, 3>,
+    label text
+);
+CREATE INDEX vector_items_floats ON vector_items (floats) USING 'sai';

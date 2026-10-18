@@ -189,7 +189,9 @@ fn collect_udts(ty: &CqlType, ir: &Ir, out: &mut BTreeSet<String>) {
                 }
             }
         }
-        CqlType::List(t) | CqlType::Set(t) | CqlType::Frozen(t) => collect_udts(t, ir, out),
+        CqlType::List(t) | CqlType::Set(t) | CqlType::Frozen(t) | CqlType::Vector(t, _) => {
+            collect_udts(t, ir, out)
+        }
         CqlType::Map(k, v) => {
             collect_udts(k, ir, out);
             collect_udts(v, ir, out);
@@ -941,7 +943,9 @@ fn rust_type(ty: &CqlType, opts: &Options, ord: bool, udts: &[Udt]) -> Result<St
         TinyInt => "i8".into(),
         Uuid => "::uuid::Uuid".into(),
         VarInt => "::scylla::value::CqlVarint".into(),
-        List(t) => format!("::std::vec::Vec<{}>", rust_type(t, opts, false, udts)?),
+        List(t) | Vector(t, _) => {
+            format!("::std::vec::Vec<{}>", rust_type(t, opts, false, udts)?)
+        }
         Set(t) => format!(
             "::std::collections::BTreeSet<{}>",
             rust_type(t, opts, true, udts)?
@@ -980,7 +984,7 @@ fn is_ord_inner(ty: &CqlType, udts: &[Udt], seen: &mut Vec<String>) -> bool {
     match ty {
         Ascii | Text | Boolean | TinyInt | SmallInt | Int | BigInt | Uuid | TimeUuid
         | Timestamp | Date | Time | Inet | Blob => true,
-        List(t) | Set(t) | Frozen(t) => is_ord_inner(t, udts, seen),
+        List(t) | Set(t) | Frozen(t) | Vector(t, _) => is_ord_inner(t, udts, seen),
         Map(k, v) => is_ord_inner(k, udts, seen) && is_ord_inner(v, udts, seen),
         Tuple(ts) => ts.iter().all(|t| is_ord_inner(t, udts, seen)),
         Udt(name) => {

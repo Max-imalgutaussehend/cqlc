@@ -56,6 +56,8 @@ pub enum CqlType {
     Tuple(Vec<CqlType>),
     /// `frozen<T>`
     Frozen(Box<CqlType>),
+    /// `vector<T, N>` (Cassandra 5.0)
+    Vector(Box<CqlType>, u32),
     /// A user-defined type, by name.
     Udt(String),
 }
@@ -122,7 +124,9 @@ impl CqlType {
     pub fn contains_udt(&self) -> bool {
         match self {
             CqlType::Udt(_) => true,
-            CqlType::List(t) | CqlType::Set(t) | CqlType::Frozen(t) => t.contains_udt(),
+            CqlType::List(t) | CqlType::Set(t) | CqlType::Frozen(t) | CqlType::Vector(t, _) => {
+                t.contains_udt()
+            }
             CqlType::Map(k, v) => k.contains_udt() || v.contains_udt(),
             CqlType::Tuple(ts) => ts.iter().any(CqlType::contains_udt),
             _ => false,
@@ -156,6 +160,7 @@ impl fmt::Display for CqlType {
             CqlType::List(t) => return write!(f, "list<{t}>"),
             CqlType::Set(t) => return write!(f, "set<{t}>"),
             CqlType::Frozen(t) => return write!(f, "frozen<{t}>"),
+            CqlType::Vector(t, n) => return write!(f, "vector<{t}, {n}>"),
             CqlType::Map(k, v) => return write!(f, "map<{k}, {v}>"),
             CqlType::Tuple(ts) => {
                 f.write_str("tuple<")?;
@@ -205,6 +210,8 @@ pub enum RelOp {
     Contains,
     /// `CONTAINS KEY`
     ContainsKey,
+    /// `LIKE` (SASI indexes)
+    Like,
 }
 
 impl RelOp {
@@ -230,6 +237,7 @@ impl RelOp {
             RelOp::In => "in",
             RelOp::Contains => "contains",
             RelOp::ContainsKey => "contains_key",
+            RelOp::Like => "like",
         }
     }
 }

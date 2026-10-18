@@ -34,6 +34,15 @@ pub enum Statement {
     CreateKeyspace(CreateKeyspace),
     CreateTable(CreateTable),
     CreateType(CreateType),
+    CreateIndex(CreateIndex),
+    CreateView(CreateView),
+    CreateFunction(CreateFunction),
+    CreateAggregate(CreateAggregate),
+    AlterTable(AlterTable),
+    AlterType(AlterType),
+    Drop(Drop),
+    /// Statements that do not influence typing (`USE`, `TRUNCATE`, `GRANT`, roles, triggers, ...).
+    Ignored(Ignored),
     Select(Select),
     Insert(Insert),
     Update(Update),
@@ -42,9 +51,12 @@ pub enum Statement {
 
 impl Statement {
     pub fn is_ddl(&self) -> bool {
-        matches!(
+        !matches!(
             self,
-            Statement::CreateKeyspace(_) | Statement::CreateTable(_) | Statement::CreateType(_)
+            Statement::Select(_)
+                | Statement::Insert(_)
+                | Statement::Update(_)
+                | Statement::Delete(_)
         )
     }
 
@@ -71,6 +83,10 @@ pub struct ColumnDef {
     pub ty_span: Span,
     pub is_static: bool,
     pub inline_primary_key: bool,
+    /// `MASKED WITH ...` (Cassandra 5.0): dynamic data masking; no effect on the type.
+    pub masked: bool,
+    /// A `CHECK ...` constraint (Cassandra 6.0); no effect on the type.
+    pub has_check: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -86,6 +102,118 @@ pub struct CreateTable {
     pub columns: Vec<ColumnDef>,
     pub primary_key: Option<PrimaryKeyDef>,
     pub clustering_order: Vec<(Ident, Order)>,
+    pub span: Span,
+}
+
+/// Which part of a column an index covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndexKind {
+    /// The column value (or the collection's values).
+    Values,
+    /// `KEYS(col)`: map keys.
+    Keys,
+    /// `ENTRIES(col)`: map entries.
+    Entries,
+    /// `FULL(col)`: a frozen collection as a whole.
+    Full,
+}
+
+/// `CREATE [CUSTOM] INDEX [name] ON t (target) [USING 'class']`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateIndex {
+    pub name: Option<Ident>,
+    pub table: TableName,
+    pub column: Ident,
+    pub kind: IndexKind,
+    /// The `USING` class, verbatim (`sai`, `org.apache.cassandra.index.sai.StorageAttachedIndex`, ...).
+    pub class: Option<String>,
+    pub span: Span,
+}
+
+/// `CREATE MATERIALIZED VIEW v AS SELECT ... FROM base WHERE ... PRIMARY KEY (...)`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateView {
+    pub name: TableName,
+    pub base: TableName,
+    /// `None` for `SELECT *`.
+    pub columns: Option<Vec<Ident>>,
+    pub primary_key: PrimaryKeyDef,
+    pub clustering_order: Vec<(Ident, Order)>,
+    pub span: Span,
+}
+
+/// `CREATE FUNCTION f (a int, b text) ... RETURNS type ...` (the body is not analysed).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateFunction {
+    pub name: TableName,
+    pub args: Vec<CqlType>,
+    pub returns: CqlType,
+    pub span: Span,
+}
+
+/// `CREATE AGGREGATE a (int) SFUNC f STYPE type [FINALFUNC g]`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateAggregate {
+    pub name: TableName,
+    pub args: Vec<CqlType>,
+    pub state_type: CqlType,
+    pub final_func: Option<Ident>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum AlterTableAction {
+    Add(Vec<ColumnDef>),
+    Drop(Vec<Ident>),
+    Rename(Vec<(Ident, Ident)>),
+    /// `WITH options`, `DROP COMPACT STORAGE`, `ALTER col MASKED/DROP MASKED`: no effect on types.
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AlterTable {
+    pub table: TableName,
+    pub action: AlterTableAction,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum AlterTypeAction {
+    Add(Ident, CqlType),
+    Rename(Vec<(Ident, Ident)>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AlterType {
+    pub name: TableName,
+    pub action: AlterTypeAction,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropKind {
+    Table,
+    Type,
+    Index,
+    View,
+    Keyspace,
+    Function,
+    Aggregate,
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Drop {
+    pub kind: DropKind,
+    pub name: TableName,
+    pub if_exists: bool,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ignored {
+    /// The leading keywords, for diagnostics (`USE`, `TRUNCATE`, `GRANT`, ...).
+    pub what: String,
     pub span: Span,
 }
 
@@ -106,6 +234,8 @@ pub enum Literal {
     Bool(bool),
     Uuid(String),
     Blob(String),
+    /// A duration literal such as `1d` or `1h30m` (Cassandra duration syntax).
+    Duration(String),
     Null,
 }
 
@@ -132,6 +262,10 @@ pub enum ExprKind {
         star: bool,
     },
     Cast(Box<Expr>, CqlType),
+    /// `a + b`, `a - b`, `a * b`, `a / b`, `a % b` (Cassandra 4.0 arithmetic).
+    Binary(BinOp, Box<Expr>, Box<Expr>),
+    /// `-expr`
+    Neg(Box<Expr>),
     /// `[a, b]`
     List(Vec<Expr>),
     /// `(a, b)`
@@ -144,6 +278,27 @@ pub enum ExprKind {
     Udt(Vec<(Ident, Expr)>),
     /// `{}`: an empty set or map, decided by the expected type.
     EmptyBraces,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+}
+
+impl BinOp {
+    pub fn symbol(self) -> &'static str {
+        match self {
+            BinOp::Add => "+",
+            BinOp::Sub => "-",
+            BinOp::Mul => "*",
+            BinOp::Div => "/",
+            BinOp::Rem => "%",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -215,6 +370,8 @@ pub struct Select {
     pub where_clause: Vec<Relation>,
     pub group_by: Vec<Ident>,
     pub order_by: Vec<(Ident, Order)>,
+    /// `ORDER BY col ANN OF vector` (Cassandra 5.0 vector search).
+    pub ann: Option<(Ident, Expr)>,
     pub per_partition_limit: Option<Expr>,
     pub limit: Option<Expr>,
     pub allow_filtering: bool,

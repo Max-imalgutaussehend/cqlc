@@ -27,6 +27,8 @@ pub struct Column {
     pub role: ColumnRole,
     /// Declared `STATIC`.
     pub is_static: bool,
+    /// Declared `MASKED WITH ...` (Cassandra 5.0 dynamic data masking).
+    pub masked: bool,
     /// Where the column is defined.
     pub span: Span,
 }
@@ -67,11 +69,74 @@ pub struct Table {
     pub partition_key: Vec<String>,
     /// Clustering columns, in key order.
     pub clustering: Vec<ClusteringColumn>,
+    /// For a materialized view: the base table it reads from. Views are read-only.
+    pub base_table: Option<String>,
+    /// Secondary indexes (legacy, SAI, SASI or custom) defined on this table.
+    pub indexes: Vec<Index>,
     /// Where the table is defined.
     pub span: Span,
 }
 
+/// Which kind of index implementation serves a column.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum IndexClass {
+    /// `CREATE INDEX` without `USING`: the classic secondary index (equality, `CONTAINS`).
+    Legacy,
+    /// Storage-Attached Index, `USING 'sai'` (Cassandra 5.0): equality, ranges, `CONTAINS`, vector `ANN`.
+    Sai,
+    /// SASI, `USING '...SASIIndex'`: equality, ranges and `LIKE`.
+    Sasi,
+    /// Any other custom index class; cqlc does not know its capabilities.
+    Custom(String),
+}
+
+impl IndexClass {
+    /// Classifies a `USING 'class'` string.
+    pub fn from_using(class: Option<&str>) -> IndexClass {
+        match class.map(str::to_ascii_lowercase).as_deref() {
+            None => IndexClass::Legacy,
+            Some(c) if c == "sai" || c.contains("storageattachedindex") => IndexClass::Sai,
+            Some(c) if c.contains("sasi") => IndexClass::Sasi,
+            Some(_) => IndexClass::Custom(class.unwrap_or_default().to_string()),
+        }
+    }
+}
+
+/// A secondary index on one column.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct Index {
+    /// Index name, if given.
+    pub name: Option<String>,
+    /// The indexed column.
+    pub column: String,
+    /// Which part of the column is indexed.
+    pub kind: crate::ast::IndexKind,
+    /// Implementation.
+    pub class: IndexClass,
+}
+
+/// A user-defined function or aggregate.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct Function {
+    /// Function name (keyspace dropped).
+    pub name: String,
+    /// Argument types.
+    pub args: Vec<CqlType>,
+    /// Result type.
+    pub returns: CqlType,
+    /// `true` for `CREATE AGGREGATE`.
+    pub aggregate: bool,
+}
+
 impl Table {
+    /// Whether `column` has an index that can serve `op` (see [`Table::indexes`]).
+    pub fn index_for(&self, column: &str) -> Option<&Index> {
+        self.indexes.iter().find(|i| i.column == column)
+    }
+
     /// Finds a column by its normalized name.
     pub fn column(&self, name: &str) -> Option<&Column> {
         self.columns.iter().find(|c| c.name == name)
@@ -115,9 +180,16 @@ pub struct Schema {
     pub tables: Vec<Table>,
     /// User-defined types in definition order.
     pub udts: Vec<Udt>,
+    /// User-defined functions and aggregates.
+    pub functions: Vec<Function>,
 }
 
 impl Schema {
+    /// Finds a user-defined function or aggregate by name.
+    pub fn function(&self, name: &str) -> Option<&Function> {
+        self.functions.iter().find(|f| f.name == name)
+    }
+
     /// Finds a user-defined type by name.
     pub fn udt(&self, name: &str) -> Option<&Udt> {
         self.udts.iter().find(|u| u.name == name)

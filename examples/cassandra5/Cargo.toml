@@ -1,0 +1,14 @@
+[package]
+name = "cqlc-example-cassandra5"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "cqlc against Apache Cassandra 5.0: vector search (ANN OF), SAI indexes, masking, new functions"
+
+[dependencies]
+async-trait = "0.1"
+scylla = "1.9"
+uuid = { version = "1", features = ["v4"] }
+futures = "0.3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -13,11 +13,17 @@ being guessed.
 | other `WITH` options | skipped; they do not influence types |
 | `CREATE TYPE [IF NOT EXISTS] [ks.]t (...)` | becomes a Rust struct when a query uses it |
 | `CREATE KEYSPACE ...` | accepted, options ignored |
-| anything else (`USE`, `CREATE INDEX`, `ALTER`, ...) | `CQL002` |
+| `CREATE [CUSTOM] INDEX [name] ON t (col \| KEYS(col) \| VALUES(col) \| ENTRIES(col) \| FULL(col)) [USING 'class']` | legacy, SAI (`'sai'`) and SASI indexes are recorded; they decide which restrictions are legal and are required by `ANN OF` and `LIKE` |
+| `CREATE MATERIALIZED VIEW v AS SELECT ... PRIMARY KEY (...)` | becomes a read-only table; writes to it are rejected |
+| `CREATE FUNCTION` / `CREATE AGGREGATE` | callable from queries with the declared types (the body is not analysed) |
+| `ALTER TABLE ... ADD / DROP / RENAME / WITH`, `ALTER TYPE ... ADD / RENAME` | applied to the schema in file order |
+| `DROP TABLE / TYPE / INDEX / MATERIALIZED VIEW / KEYSPACE / FUNCTION / AGGREGATE` | applied in file order |
+| `USE`, `TRUNCATE`, `GRANT`, `REVOKE`, `LIST`, `CREATE/ALTER/DROP ROLE/USER/TRIGGER`, `ALTER KEYSPACE` | accepted and ignored: they do not influence types |
+| `MASKED WITH ...` on a column (Cassandra 5.0), `CHECK ...` constraints (Cassandra 6.0) | parsed; no effect on the generated types |
 
 Types: `ascii bigint blob boolean counter date decimal double duration float inet int smallint
 text|varchar time timestamp timeuuid tinyint uuid varint`, `list<T>`, `set<T>`, `map<K,V>`,
-`tuple<...>`, `frozen<T>` and user-defined types. Using a reserved keyword such as `token` as an
+`tuple<...>`, `frozen<T>`, `vector<T, N>` (Cassandra 5.0, generated as `Vec<T>`) and user-defined types. Using a reserved keyword such as `token` as an
 unquoted name is an error (`CQL115`), as in Cassandra.
 
 ## Query files
@@ -48,7 +54,17 @@ Every statement needs a `-- name: Name :kind` comment directly before it. Option
 restrictions (`m[?] = ?`), `token(a, b) > token(?, ?)` and tuple relations
 (`(c1, c2) > (?, ?)`, `(c1, c2) IN ((?, ?), (?, ?))`, `(c1, c2) > ?`).
 
-Rejected: `LIKE`, `!=` in `WHERE` (valid only in `IF`), restrictions on UDT fields.
+`LIKE` (needs a text column; the index decides whether Cassandra accepts it). Rejected: `!=` in `WHERE` (valid only in `IF`), restrictions on UDT fields.
+
+Restrictions on non-key columns are legal when an index serves the operator: legacy indexes serve `=`, `CONTAINS` and `CONTAINS KEY`; SAI adds `<`, `<=`, `>`, `>=`; SASI adds ranges and `LIKE`. Otherwise `CQL203` applies.
+
+### Vector search (Cassandra 5.0)
+
+`ORDER BY col ANN OF <vector> LIMIT n` needs a `vector<T, N>` column with a SAI index, a `LIMIT` of at most 1000 and no other `ORDER BY` column. The vector can be a bind marker (`Vec<f32>`) or a literal `[0.1, 0.2, ...]` of the right dimension.
+
+### Arithmetic (Cassandra 4.0)
+
+`+ - * / %` and unary `-` in the selection list, in relations and in values. The result type follows Cassandra's `OperationFcts`: numbers take the wider type (`int + bigint` is `bigint`, `float + bigint` is `double`, anything with `decimal` or `varint` is `decimal`/`varint`), `timestamp` and `date` plus or minus a `duration` (`1d`, `3h30m` literals or a marker), and `text + text`. `timestamp - timestamp` does not exist in Cassandra and is an error. In `UPDATE ... SET` only `col = col +/- v` and `col = v + col` are supported.
 
 ### Functions
 
@@ -61,12 +77,21 @@ Rejected: `LIKE`, `!=` in `WHERE` (valid only in `IF`), restrictions on UDT fiel
 | `minTimeuuid(ts)`, `maxTimeuuid(ts)` | `timeuuid` |
 | `token(pk...)` | `bigint` |
 | `writetime(col)`, `ttl(col)` | `bigint`, `int` (nullable) |
+| `maxwritetime(col)` (5.0) | `bigint` (nullable; also on collections) |
+| `abs`, `exp`, `log`, `log10`, `round` (5.0) | the argument's type |
+| `map_keys(m)`, `map_values(m)` (5.0) | `set<K>`, `list<V>` |
+| `collection_count(c)`, `collection_min/max/sum/avg(c)` (5.0) | `int`, the element type |
+| `similarity_cosine / euclidean / dot_product(v1, v2)` (5.0) | `float` (two `vector<float, N>` of the same dimension) |
+| `mask_null`, `mask_default`, `mask_replace`, `mask_inner`, `mask_outer`, `mask_hash` (5.0) | the argument's type, `text`, `blob` for `mask_hash` |
+| `toJson(x)` | `text` |
+| `<type>AsBlob(x)`, `blobAs<type>(b)` | `blob`, the type |
+| `dateOf(timeuuid)`, `unixTimestampOf(timeuuid)` | `timestamp`, `bigint` |
+| functions and aggregates from `CREATE FUNCTION` / `CREATE AGGREGATE` | their declared result type |
 | `count(*)`, `count(col)` | `bigint` |
 | `sum(col)`, `avg(col)`, `min(col)`, `max(col)` | the column's type |
 | `cast(x AS type)` | the target type |
 
-Unknown functions are `CQL113`. User-defined functions and aggregates are not supported.
-Arithmetic (`a + b`) in selections is not supported.
+Unknown functions are `CQL113`.
 
 ### INSERT
 
@@ -102,7 +127,7 @@ fields, and `IF NOT EXISTS` on UPDATE/DELETE. Conditions on primary key columns 
 
 * At most 16 bind markers per query (the driver serializes tuples up to 16).
 * Named markers (`:name`) are not supported; use `?`.
-* Batches, `TRUNCATE`, `USE` and DDL in query files are not supported.
+* Batches, `BEGIN TRANSACTION` (Cassandra 6.0 Accord), `TRUNCATE`, `USE` and DDL in query files are not supported.
 
 ## Rust type mapping
 
@@ -116,6 +141,7 @@ fields, and `IF NOT EXISTS` on UPDATE/DELETE. Conditions on primary key columns 
 | `uuid` | `uuid::Uuid` |
 | `timeuuid` | `scylla::value::CqlTimeuuid` |
 | `inet` | `std::net::IpAddr` |
+| `vector<T, N>` | `Vec<T>` |
 | `decimal`, `varint`, `duration`, `counter` | `CqlDecimal`, `CqlVarint`, `CqlDuration`, `Counter` (`scylla::value`) |
 | `timestamp`, `date`, `time` | native: `CqlTimestamp`, `CqlDate`, `CqlTime`; chrono: `DateTime<Utc>`, `NaiveDate`, `NaiveTime` |
 | `list<T>` | `Vec<T>` |

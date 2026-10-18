@@ -1913,6 +1913,130 @@ pub async fn get_hits(session: &::scylla::client::session::Session, id: ::uuid::
     get_hits_with(session, &prepared, id).await
 }
 
+/// CQL of [`insert_vector_item`] (`InsertVectorItem`).
+pub const INSERT_VECTOR_ITEM_CQL: &str = "INSERT INTO vector_items (id, floats, ints, label) VALUES (?, ?, ?, ?)";
+
+/// Bind values of [`insert_vector_item`], in the order of the bind markers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InsertVectorItemParams {
+    /// `id`
+    pub id: i32,
+    /// `floats`. `None` binds NULL (a delete marker), it does not leave the value unset.
+    pub floats: ::std::option::Option<::std::vec::Vec<f32>>,
+    /// `ints`. `None` binds NULL (a delete marker), it does not leave the value unset.
+    pub ints: ::std::option::Option<::std::vec::Vec<i32>>,
+    /// `label`. `None` binds NULL (a delete marker), it does not leave the value unset.
+    pub label: ::std::option::Option<::std::string::String>,
+}
+
+async fn insert_vector_item_with(session: &::scylla::client::session::Session, prepared: &::scylla::statement::prepared::PreparedStatement, params: InsertVectorItemParams) -> ::std::result::Result<(), CqlcError> {
+    session.execute_unpaged(prepared, (&params.id, &params.floats, &params.ints, &params.label,)).await.map_err(|e| CqlcError::new("InsertVectorItem", CqlcErrorKind::Execute, e))?;
+    Ok(())
+}
+
+/// Runs query `InsertVectorItem` (`:exec`).
+///
+/// ```text
+/// INSERT INTO vector_items (id, floats, ints, label) VALUES (?, ?, ?, ?)
+/// ```
+///
+/// Prepares the statement on every call; use [`Queries`] to prepare once.
+pub async fn insert_vector_item(session: &::scylla::client::session::Session, params: InsertVectorItemParams) -> ::std::result::Result<(), CqlcError> {
+    let prepared = session.prepare(INSERT_VECTOR_ITEM_CQL).await.map_err(|e| CqlcError::new("InsertVectorItem", CqlcErrorKind::Prepare, e))?;
+    insert_vector_item_with(session, &prepared, params).await
+}
+
+/// CQL of [`get_vector_item`] (`GetVectorItem`).
+pub const GET_VECTOR_ITEM_CQL: &str = "SELECT id, floats, ints, label FROM vector_items WHERE id = ?";
+
+/// One result row of [`get_vector_item`].
+#[derive(Debug, Clone, PartialEq, ::scylla::DeserializeRow)]
+pub struct GetVectorItemRow {
+    pub id: i32,
+    pub floats: ::std::option::Option<::std::vec::Vec<f32>>,
+    pub ints: ::std::option::Option<::std::vec::Vec<i32>>,
+    pub label: ::std::option::Option<::std::string::String>,
+}
+
+async fn get_vector_item_with(session: &::scylla::client::session::Session, prepared: &::scylla::statement::prepared::PreparedStatement, id: i32) -> ::std::result::Result<::std::option::Option<GetVectorItemRow>, CqlcError> {
+    let result = session.execute_unpaged(prepared, (&id,)).await.map_err(|e| CqlcError::new("GetVectorItem", CqlcErrorKind::Execute, e))?;
+    let rows = result.into_rows_result().map_err(|e| CqlcError::new("GetVectorItem", CqlcErrorKind::Rows, e))?;
+    rows.maybe_first_row::<GetVectorItemRow>().map_err(|e| CqlcError::new("GetVectorItem", CqlcErrorKind::Deserialize, e))
+}
+
+/// Runs query `GetVectorItem` (`:one`).
+///
+/// ```text
+/// SELECT id, floats, ints, label FROM vector_items WHERE id = ?
+/// ```
+///
+/// Returns `None` if no row matched. The query is expected to match at most one
+/// row; if it matches several, the first one is returned.
+///
+/// Prepares the statement on every call; use [`Queries`] to prepare once.
+pub async fn get_vector_item(session: &::scylla::client::session::Session, id: i32) -> ::std::result::Result<::std::option::Option<GetVectorItemRow>, CqlcError> {
+    let prepared = session.prepare(GET_VECTOR_ITEM_CQL).await.map_err(|e| CqlcError::new("GetVectorItem", CqlcErrorKind::Prepare, e))?;
+    get_vector_item_with(session, &prepared, id).await
+}
+
+/// CQL of [`nearest_vector_items`] (`NearestVectorItems`).
+pub const NEAREST_VECTOR_ITEMS_CQL: &str = "SELECT id, label, similarity_cosine(floats, ?) AS score FROM vector_items ORDER BY floats ANN OF ? LIMIT 10";
+
+/// One result row of [`nearest_vector_items`].
+#[derive(Debug, Clone, PartialEq, ::scylla::DeserializeRow)]
+pub struct NearestVectorItemsRow {
+    pub id: i32,
+    pub label: ::std::option::Option<::std::string::String>,
+    pub score: ::std::option::Option<f32>,
+}
+
+/// Bind values of [`nearest_vector_items`], in the order of the bind markers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NearestVectorItemsParams {
+    /// value used in an expression
+    pub score: ::std::vec::Vec<f32>,
+    /// `floats` (eq)
+    pub floats_ann: ::std::vec::Vec<f32>,
+}
+
+async fn nearest_vector_items_with(session: &::scylla::client::session::Session, prepared: &::scylla::statement::prepared::PreparedStatement, params: NearestVectorItemsParams) -> ::std::result::Result<::std::vec::Vec<NearestVectorItemsRow>, CqlcError> {
+    let result = session.execute_unpaged(prepared, (&params.score, &params.floats_ann,)).await.map_err(|e| CqlcError::new("NearestVectorItems", CqlcErrorKind::Execute, e))?;
+    let rows = result.into_rows_result().map_err(|e| CqlcError::new("NearestVectorItems", CqlcErrorKind::Rows, e))?;
+    rows.rows::<NearestVectorItemsRow>().map_err(|e| CqlcError::new("NearestVectorItems", CqlcErrorKind::Rows, e))?
+        .collect::<::std::result::Result<::std::vec::Vec<_>, _>>()
+        .map_err(|e| CqlcError::new("NearestVectorItems", CqlcErrorKind::Deserialize, e))
+}
+
+/// Runs query `NearestVectorItems` (`:many`).
+///
+/// ```text
+/// SELECT id, label, similarity_cosine(floats, ?) AS score FROM vector_items ORDER BY floats ANN OF ? LIMIT 10
+/// ```
+///
+/// Loads the whole result set into memory (unpaged); see the `stream_` variant
+/// for large results.
+///
+/// Prepares the statement on every call; use [`Queries`] to prepare once.
+pub async fn nearest_vector_items(session: &::scylla::client::session::Session, params: NearestVectorItemsParams) -> ::std::result::Result<::std::vec::Vec<NearestVectorItemsRow>, CqlcError> {
+    let prepared = session.prepare(NEAREST_VECTOR_ITEMS_CQL).await.map_err(|e| CqlcError::new("NearestVectorItems", CqlcErrorKind::Prepare, e))?;
+    nearest_vector_items_with(session, &prepared, params).await
+}
+
+async fn stream_nearest_vector_items_with(session: &::scylla::client::session::Session, prepared: &::scylla::statement::prepared::PreparedStatement, params: NearestVectorItemsParams) -> ::std::result::Result<::futures::stream::BoxStream<'static, ::std::result::Result<NearestVectorItemsRow, CqlcError>>, CqlcError> {
+    let pager = session.execute_iter(prepared.clone(), (&params.score, &params.floats_ann,)).await.map_err(|e| CqlcError::new("NearestVectorItems", CqlcErrorKind::Execute, e))?;
+    let stream = pager.rows_stream::<NearestVectorItemsRow>().map_err(|e| CqlcError::new("NearestVectorItems", CqlcErrorKind::Rows, e))?;
+    Ok(::futures::StreamExt::boxed(::futures::StreamExt::map(stream, |r| r.map_err(|e| CqlcError::new("NearestVectorItems", CqlcErrorKind::Deserialize, e)))))
+}
+
+/// Streams the rows of query `NearestVectorItems` page by page.
+///
+/// Rows are deserialized lazily; the full result is never held in memory.
+/// Prepares the statement on every call; use [`Queries`] to prepare once.
+pub async fn stream_nearest_vector_items(session: &::scylla::client::session::Session, params: NearestVectorItemsParams) -> ::std::result::Result<::futures::stream::BoxStream<'static, ::std::result::Result<NearestVectorItemsRow, CqlcError>>, CqlcError> {
+    let prepared = session.prepare(NEAREST_VECTOR_ITEMS_CQL).await.map_err(|e| CqlcError::new("NearestVectorItems", CqlcErrorKind::Prepare, e))?;
+    stream_nearest_vector_items_with(session, &prepared, params).await
+}
+
 /// All queries, prepared once. Cheap to share behind an `Arc`.
 ///
 /// Prefer this over the free functions when queries run repeatedly: each free
@@ -1964,6 +2088,9 @@ pub struct Queries {
     set_type: ::scylla::statement::prepared::PreparedStatement,
     delete_range: ::scylla::statement::prepared::PreparedStatement,
     get_hits: ::scylla::statement::prepared::PreparedStatement,
+    insert_vector_item: ::scylla::statement::prepared::PreparedStatement,
+    get_vector_item: ::scylla::statement::prepared::PreparedStatement,
+    nearest_vector_items: ::scylla::statement::prepared::PreparedStatement,
 }
 
 impl Queries {
@@ -2013,7 +2140,10 @@ impl Queries {
         let set_type = session.prepare(SET_TYPE_CQL).await.map_err(|e| CqlcError::new("SetType", CqlcErrorKind::Prepare, e))?;
         let delete_range = session.prepare(DELETE_RANGE_CQL).await.map_err(|e| CqlcError::new("DeleteRange", CqlcErrorKind::Prepare, e))?;
         let get_hits = session.prepare(GET_HITS_CQL).await.map_err(|e| CqlcError::new("GetHits", CqlcErrorKind::Prepare, e))?;
-        Ok(Queries { session, create_customer, create_customer_from_json, create_customer_if_absent, get_customer, get_customer_json, customer_meta, count_customers, set_primary_address, add_tag, remove_tag, prepend_phone, set_address, clear_address, clear_collections, rename_customer, customers_by_ids, customers_by_tag, scan_by_token, delete_customer_if_exists, count_view, view_count, add_reading, readings_of_day, reading_stats, reserve_stock, create_session, session_customer, place_order, orders_since, orders_page, count_orders, totals, customers_with_orders, latest_order_per_customer, orders_per_customer, ship_order, get_all, insert_scalars, insert_rest, list_in_range, list_by_ids, set_type, delete_range, get_hits })
+        let insert_vector_item = session.prepare(INSERT_VECTOR_ITEM_CQL).await.map_err(|e| CqlcError::new("InsertVectorItem", CqlcErrorKind::Prepare, e))?;
+        let get_vector_item = session.prepare(GET_VECTOR_ITEM_CQL).await.map_err(|e| CqlcError::new("GetVectorItem", CqlcErrorKind::Prepare, e))?;
+        let nearest_vector_items = session.prepare(NEAREST_VECTOR_ITEMS_CQL).await.map_err(|e| CqlcError::new("NearestVectorItems", CqlcErrorKind::Prepare, e))?;
+        Ok(Queries { session, create_customer, create_customer_from_json, create_customer_if_absent, get_customer, get_customer_json, customer_meta, count_customers, set_primary_address, add_tag, remove_tag, prepend_phone, set_address, clear_address, clear_collections, rename_customer, customers_by_ids, customers_by_tag, scan_by_token, delete_customer_if_exists, count_view, view_count, add_reading, readings_of_day, reading_stats, reserve_stock, create_session, session_customer, place_order, orders_since, orders_page, count_orders, totals, customers_with_orders, latest_order_per_customer, orders_per_customer, ship_order, get_all, insert_scalars, insert_rest, list_in_range, list_by_ids, set_type, delete_range, get_hits, insert_vector_item, get_vector_item, nearest_vector_items })
     }
 
     /// The session the statements were prepared on.
@@ -2239,6 +2369,22 @@ impl Queries {
 
     pub async fn get_hits(&self, id: ::uuid::Uuid) -> ::std::result::Result<::std::option::Option<GetHitsRow>, CqlcError> {
         get_hits_with(&self.session, &self.get_hits, id).await
+    }
+
+    pub async fn insert_vector_item(&self, params: InsertVectorItemParams) -> ::std::result::Result<(), CqlcError> {
+        insert_vector_item_with(&self.session, &self.insert_vector_item, params).await
+    }
+
+    pub async fn get_vector_item(&self, id: i32) -> ::std::result::Result<::std::option::Option<GetVectorItemRow>, CqlcError> {
+        get_vector_item_with(&self.session, &self.get_vector_item, id).await
+    }
+
+    pub async fn nearest_vector_items(&self, params: NearestVectorItemsParams) -> ::std::result::Result<::std::vec::Vec<NearestVectorItemsRow>, CqlcError> {
+        nearest_vector_items_with(&self.session, &self.nearest_vector_items, params).await
+    }
+
+    pub async fn stream_nearest_vector_items(&self, params: NearestVectorItemsParams) -> ::std::result::Result<::futures::stream::BoxStream<'static, ::std::result::Result<NearestVectorItemsRow, CqlcError>>, CqlcError> {
+        stream_nearest_vector_items_with(&self.session, &self.nearest_vector_items, params).await
     }
 }
 
