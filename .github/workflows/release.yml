@@ -80,7 +80,7 @@ jobs:
             # let the index catch up before the next crate depends on it
             sleep 30
           done
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
