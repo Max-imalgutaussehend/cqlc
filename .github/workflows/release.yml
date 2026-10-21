@@ -53,7 +53,7 @@ jobs:
             tar czf "$dir.tar.gz" "$dir"
             echo "ASSET=$dir.tar.gz" >> "$GITHUB_ENV"
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
           path: ${{ env.ASSET }}
