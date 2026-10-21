@@ -17,7 +17,7 @@ jobs:
     name: fmt, clippy, tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -39,7 +39,7 @@ jobs:
     name: MSRV (1.88)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
       # The published crates only: the examples depend on whatever the driver's dependencies need.
@@ -50,7 +50,7 @@ jobs:
     env:
       RUSTDOCFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --no-deps -p cqlc-core -p cqlc-codegen
@@ -70,7 +70,7 @@ jobs:
           - name: ScyllaDB
             run: docker run -d --name db -p 9042:9042 scylladb/scylla:latest --smp 1 --memory 750M --overprovisioned 1 --developer-mode 1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: start server
@@ -104,7 +104,7 @@ jobs:
     name: fuzz (60s per target)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
         with:
@@ -131,7 +131,7 @@ jobs:
       issues: write
       checks: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
